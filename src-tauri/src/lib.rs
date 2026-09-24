@@ -356,11 +356,13 @@ fn open_path_with_default_app(path: &Path) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        // explorer.exe applies the default file association without going
-        // through the cmd parser, where `&` or `^` in an otherwise legal path
-        // (`C:\src\R&D\notes.txt`) would be read as a command separator.
-        Command::new("explorer.exe")
-            .arg(path)
+        let win_path = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let mut path_str = win_path.to_string_lossy().replace('/', "\\");
+        if let Some(stripped) = path_str.strip_prefix(r"\\?\") {
+            path_str = stripped.to_string();
+        }
+        Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", &path_str])
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|error| error.to_string())?;
@@ -397,8 +399,13 @@ fn reveal_path_in_file_manager(path: &Path) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
+        let win_path = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let mut path_str = win_path.to_string_lossy().replace('/', "\\");
+        if let Some(stripped) = path_str.strip_prefix(r"\\?\") {
+            path_str = stripped.to_string();
+        }
         Command::new("explorer.exe")
-            .arg(format!("/select,{}", path.to_string_lossy()))
+            .arg(format!("/select,{}", path_str))
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|error| error.to_string())?;

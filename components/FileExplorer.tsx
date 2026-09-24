@@ -1,6 +1,7 @@
 "use client";
 
 import { forwardRef, useState, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
 import { getFileIcon, FolderIcon } from "./FileIcons";
 import {
   encodeFilePathForApi,
@@ -214,6 +215,75 @@ function DismissButton({ onClick, title }: { onClick: () => void; title: string 
   );
 }
 
+type ContextMenuTarget =
+  | { type: "file"; fullPath: string; name: string; relPath: string }
+  | { type: "dir"; fullPath: string; name: string; relPath: string; open: boolean; toggleOpen: () => void }
+  | { type: "change"; fullPath: string; name: string; relPath: string }
+  | { type: "background"; fullPath: string };
+
+function RevealFolderIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+    </svg>
+  );
+}
+
+function OpenFileIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+    </svg>
+  );
+}
+
+function DownloadFileIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </svg>
+  );
+}
+
+function CopyPathIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+
+function ToolsIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
+      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+    </svg>
+  );
+}
+
+function RefreshTreeIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
+      <path d="M21 2v6h-6" />
+      <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+      <path d="M3 22v-6h6" />
+      <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+    </svg>
+  );
+}
+
+function ChevronRightIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ marginLeft: "auto", flexShrink: 0, opacity: 0.65 }} aria-hidden="true">
+      <polyline points="3 2 7 5 3 8" />
+    </svg>
+  );
+}
+
 function TreeNode({
   node,
   depth,
@@ -226,6 +296,7 @@ function TreeNode({
   highlightedPaths,
   gitStatusByPath,
   changedDirectoryPaths,
+  onContextMenu,
   t,
 }: {
   node: FileNode;
@@ -239,6 +310,7 @@ function TreeNode({
   highlightedPaths: Set<string>;
   gitStatusByPath: Map<string, GitFileStatus>;
   changedDirectoryPaths: Set<string>;
+  onContextMenu?: (e: React.MouseEvent, target: ContextMenuTarget) => void;
   t: Translate;
 }) {
   const open = expandedPaths.has(node.fullPath);
@@ -285,6 +357,32 @@ function TreeNode({
     }
   }, [node.isDir, node.fullPath, node.name, loaded, open, loadChildren, onOpenFile, onToggleExpanded]);
 
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (node.isDir) {
+      onContextMenu?.(e, {
+        type: "dir",
+        fullPath: node.fullPath,
+        name: node.name,
+        relPath: getRelativeFilePath(node.fullPath, cwd),
+        open,
+        toggleOpen: () => {
+          const next = !open;
+          onToggleExpanded(node.fullPath, next);
+          if (next && !loaded) loadChildren();
+        },
+      });
+    } else {
+      onContextMenu?.(e, {
+        type: "file",
+        fullPath: node.fullPath,
+        name: node.name,
+        relPath: getRelativeFilePath(node.fullPath, cwd),
+      });
+    }
+  }, [cwd, loaded, loadChildren, node.fullPath, node.isDir, node.name, onContextMenu, onToggleExpanded, open]);
+
   return (
     <div>
       <div
@@ -292,6 +390,7 @@ function TreeNode({
         tabIndex={0}
         title={node.fullPath}
         onClick={handleClick}
+        onContextMenu={handleContextMenu}
         onKeyDown={(event) => {
           if (event.key !== "Enter" && event.key !== " ") return;
           event.preventDefault();
@@ -456,6 +555,7 @@ function TreeNode({
               highlightedPaths={highlightedPaths}
               gitStatusByPath={gitStatusByPath}
               changedDirectoryPaths={changedDirectoryPaths}
+              onContextMenu={onContextMenu}
               t={t}
             />
           ))}
@@ -479,12 +579,14 @@ function ChangeRow({
   cwd,
   onOpenFile,
   onAtMention,
+  onContextMenu,
   t,
 }: {
   status: GitFileStatus;
   cwd: string;
   onOpenFile: OpenFileHandler;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
+  onContextMenu?: (e: React.MouseEvent, target: ContextMenuTarget) => void;
   t: Translate;
 }) {
   const [hovered, setHovered] = useState(false);
@@ -494,9 +596,22 @@ function ChangeRow({
   const lastSlash = rel.lastIndexOf("/");
   const dirPart = lastSlash >= 0 ? rel.slice(0, lastSlash + 1) : "";
   const baseName = lastSlash >= 0 ? rel.slice(lastSlash + 1) : rel;
+
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onContextMenu?.(e, {
+      type: "change",
+      fullPath: status.filePath,
+      name,
+      relPath: rel,
+    });
+  }, [name, onContextMenu, rel, status.filePath]);
+
   return (
     <div
       onClick={() => onOpenFile(status.filePath, name, { modeHint: "diff" })}
+      onContextMenu={handleContextMenu}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       title={status.filePath}
@@ -619,6 +734,147 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [uploadSummary, setUploadSummary] = useState<UploadSummary | null>(null);
   const [pendingConflict, setPendingConflict] = useState<PendingConflict | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    target: ContextMenuTarget;
+  } | null>(null);
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
+  const [submenuOpen, setSubmenuOpen] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const menuRef = useRef<HTMLDivElement>(null);
+  const submenuRef = useRef<HTMLDivElement>(null);
+  const moreToolsButtonRef = useRef<HTMLButtonElement>(null);
+  const submenuTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const closeMenu = useCallback(() => {
+    if (submenuTimerRef.current) clearTimeout(submenuTimerRef.current);
+    setContextMenu(null);
+    setMenuPos(null);
+    setSubmenuOpen(false);
+  }, []);
+
+  const handleOpenContextMenu = useCallback((e: React.MouseEvent, target: ContextMenuTarget) => {
+    const MENU_WIDTH = 200;
+    const MENU_HEIGHT = 180;
+    const left = Math.max(8, Math.min(e.clientX, window.innerWidth - MENU_WIDTH - 8));
+    let top = e.clientY;
+    if (top + MENU_HEIGHT > window.innerHeight - 8) {
+      top = Math.max(8, window.innerHeight - MENU_HEIGHT - 8);
+    }
+    setMenuPos({ top, left });
+    setContextMenu({ x: e.clientX, y: e.clientY, target });
+    setSubmenuOpen(false);
+  }, []);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const onPointerDown = (ev: MouseEvent) => {
+      const target = ev.target as Node;
+      if (menuRef.current?.contains(target)) return;
+      if (submenuRef.current?.contains(target)) return;
+      closeMenu();
+    };
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") closeMenu();
+    };
+    const onScrollOrResize = () => closeMenu();
+
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    window.addEventListener("scroll", onScrollOrResize, true);
+    window.addEventListener("resize", onScrollOrResize);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize);
+    };
+  }, [closeMenu, contextMenu]);
+
+  const showToast = useCallback((msg: string) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToastMessage(msg);
+    toastTimerRef.current = setTimeout(() => {
+      setToastMessage(null);
+    }, 2000);
+  }, []);
+
+  const copyToClipboard = useCallback(async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast(t("files.pathCopied"));
+    } catch {
+      const input = document.createElement("input");
+      input.value = text;
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand("copy");
+      input.remove();
+      showToast(t("files.pathCopied"));
+    }
+  }, [showToast, t]);
+
+  const handleReveal = useCallback(async (targetPath: string) => {
+    try {
+      const { revealItemInDirNative } = await import("@/lib/desktop-native");
+      await revealItemInDirNative(targetPath);
+    } catch (err) {
+      console.error("Reveal in folder failed:", err);
+      showToast(err instanceof Error ? err.message : String(err));
+    }
+  }, [showToast]);
+
+  const refreshTree = useCallback(() => {
+    setTreeRefreshKey((k) => k + 1);
+  }, []);
+
+  const getSubmenuPosition = useCallback(() => {
+    const SUBMENU_WIDTH = 195;
+    const SUBMENU_HEIGHT = 165;
+    const btnRect = moreToolsButtonRef.current?.getBoundingClientRect();
+    let subLeft = (menuPos?.left ?? 0) + 195;
+    if (subLeft + SUBMENU_WIDTH > window.innerWidth - 8) {
+      subLeft = Math.max(8, (menuPos?.left ?? 0) - SUBMENU_WIDTH);
+    }
+    let subTop = btnRect ? btnRect.top - 4 : (menuPos?.top ?? 0);
+    if (subTop + SUBMENU_HEIGHT > window.innerHeight - 8) {
+      subTop = Math.max(8, window.innerHeight - SUBMENU_HEIGHT - 8);
+    }
+    return { top: subTop, left: subLeft };
+  }, [menuPos]);
+
+  const handleMoreToolsMouseEnter = useCallback(() => {
+    if (submenuTimerRef.current) clearTimeout(submenuTimerRef.current);
+    setSubmenuOpen(true);
+  }, []);
+
+  const handleMoreToolsMouseLeave = useCallback(() => {
+    if (submenuTimerRef.current) clearTimeout(submenuTimerRef.current);
+    submenuTimerRef.current = setTimeout(() => {
+      setSubmenuOpen(false);
+    }, 180);
+  }, []);
+
+  const handleSubmenuMouseEnter = useCallback(() => {
+    if (submenuTimerRef.current) clearTimeout(submenuTimerRef.current);
+    setSubmenuOpen(true);
+  }, []);
+
+  const handleSubmenuMouseLeave = useCallback(() => {
+    if (submenuTimerRef.current) clearTimeout(submenuTimerRef.current);
+    submenuTimerRef.current = setTimeout(() => {
+      setSubmenuOpen(false);
+    }, 180);
+  }, []);
+
+  const handleOtherItemMouseEnter = useCallback(() => {
+    if (submenuTimerRef.current) clearTimeout(submenuTimerRef.current);
+    setSubmenuOpen(false);
+  }, []);
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   useEffect(() => {
@@ -889,8 +1145,270 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     );
   }, [cwd, onAtMentions, uploadSummary]);
 
+  const menuItemStyle: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    width: "100%",
+    minHeight: 28,
+    padding: "0 8px",
+    background: "transparent",
+    border: 0,
+    borderRadius: 6,
+    color: "var(--text)",
+    cursor: "pointer",
+    fontSize: 12,
+    textAlign: "left",
+    textDecoration: "none",
+    boxSizing: "border-box",
+    userSelect: "none",
+  };
+
+  const renderContextMenuItems = () => {
+    if (!contextMenu) return null;
+    const { target } = contextMenu;
+
+    return (
+      <>
+        {target.type === "file" && (
+          <>
+            <button
+              type="button"
+              role="menuitem"
+              onMouseEnter={handleOtherItemMouseEnter}
+              onClick={() => { closeMenu(); onOpenFile(target.fullPath, target.name); }}
+              style={menuItemStyle}
+            >
+              <OpenFileIcon />
+              <span>{t("files.openFile")}</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onMouseEnter={handleOtherItemMouseEnter}
+              onClick={() => { closeMenu(); void handleReveal(target.fullPath); }}
+              style={menuItemStyle}
+            >
+              <RevealFolderIcon />
+              <span>{t("files.revealInExplorer")}</span>
+            </button>
+            <a
+              role="menuitem"
+              href={`/api/files/${encodeFilePathForApi(target.fullPath)}?type=download`}
+              download
+              onMouseEnter={handleOtherItemMouseEnter}
+              onClick={closeMenu}
+              style={menuItemStyle}
+            >
+              <DownloadFileIcon />
+              <span>{t("files.download")}</span>
+            </a>
+            <button
+              type="button"
+              role="menuitem"
+              onMouseEnter={handleOtherItemMouseEnter}
+              onClick={() => { closeMenu(); void copyToClipboard(target.relPath); }}
+              style={menuItemStyle}
+            >
+              <CopyPathIcon />
+              <span>{t("files.copyRelativePath")}</span>
+            </button>
+          </>
+        )}
+
+        {target.type === "dir" && (
+          <>
+            <button
+              type="button"
+              role="menuitem"
+              onMouseEnter={handleOtherItemMouseEnter}
+              onClick={() => { closeMenu(); target.toggleOpen(); }}
+              style={menuItemStyle}
+            >
+              <FolderIcon size={13} open={target.open} />
+              <span>{target.open ? (t("sidebar.collapseSubagents") || "折叠") : (t("sidebar.expandSubagents") || "展开")}</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onMouseEnter={handleOtherItemMouseEnter}
+              onClick={() => { closeMenu(); void handleReveal(target.fullPath); }}
+              style={menuItemStyle}
+            >
+              <RevealFolderIcon />
+              <span>{t("files.revealInExplorer")}</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onMouseEnter={handleOtherItemMouseEnter}
+              onClick={() => { closeMenu(); void copyToClipboard(target.relPath); }}
+              style={menuItemStyle}
+            >
+              <CopyPathIcon />
+              <span>{t("files.copyRelativePath")}</span>
+            </button>
+          </>
+        )}
+
+        {target.type === "change" && (
+          <>
+            <button
+              type="button"
+              role="menuitem"
+              onMouseEnter={handleOtherItemMouseEnter}
+              onClick={() => { closeMenu(); onOpenFile(target.fullPath, target.name, { modeHint: "diff" }); }}
+              style={menuItemStyle}
+            >
+              <OpenFileIcon />
+              <span>{t("files.openFile")}</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onMouseEnter={handleOtherItemMouseEnter}
+              onClick={() => { closeMenu(); void handleReveal(target.fullPath); }}
+              style={menuItemStyle}
+            >
+              <RevealFolderIcon />
+              <span>{t("files.revealInExplorer")}</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onMouseEnter={handleOtherItemMouseEnter}
+              onClick={() => { closeMenu(); void copyToClipboard(target.relPath); }}
+              style={menuItemStyle}
+            >
+              <CopyPathIcon />
+              <span>{t("files.copyRelativePath")}</span>
+            </button>
+          </>
+        )}
+
+        {target.type === "background" && (
+          <>
+            <button
+              type="button"
+              role="menuitem"
+              onMouseEnter={handleOtherItemMouseEnter}
+              onClick={() => { closeMenu(); void handleReveal(target.fullPath); }}
+              style={menuItemStyle}
+            >
+              <RevealFolderIcon />
+              <span>{t("files.revealInExplorer")}</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onMouseEnter={handleOtherItemMouseEnter}
+              onClick={() => { closeMenu(); refreshTree(); }}
+              style={menuItemStyle}
+            >
+              <RefreshTreeIcon />
+              <span>{t("files.refreshExplorer")}</span>
+            </button>
+          </>
+        )}
+
+        <div style={{ height: 1, margin: "3px 4px", background: "var(--border)" }} />
+
+        <button
+          ref={moreToolsButtonRef}
+          type="button"
+          role="menuitem"
+          aria-haspopup="menu"
+          aria-expanded={submenuOpen}
+          onMouseEnter={handleMoreToolsMouseEnter}
+          onMouseLeave={handleMoreToolsMouseLeave}
+          style={{
+            ...menuItemStyle,
+            background: submenuOpen ? "var(--bg-hover)" : "transparent",
+          }}
+        >
+          <ToolsIcon />
+          <span>{t("files.moreTools")}</span>
+          <ChevronRightIcon />
+        </button>
+      </>
+    );
+  };
+
+  const renderSubmenuItems = () => {
+    if (!contextMenu) return null;
+    const { target } = contextMenu;
+
+    return (
+      <>
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => { closeMenu(); void handleReveal(target.fullPath); }}
+          style={menuItemStyle}
+        >
+          <RevealFolderIcon />
+          <span>{t("files.revealInExplorer")}</span>
+        </button>
+
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => { closeMenu(); void copyToClipboard(target.fullPath); }}
+          style={menuItemStyle}
+        >
+          <CopyPathIcon />
+          <span>{t("files.copyFullPath")}</span>
+        </button>
+
+        {"relPath" in target && (
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => { closeMenu(); void copyToClipboard(target.relPath); }}
+            style={menuItemStyle}
+          >
+            <CopyPathIcon />
+            <span>{t("files.copyRelativePath")}</span>
+          </button>
+        )}
+
+        {"relPath" in target && onAtMention && (
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => { closeMenu(); onAtMention(target.relPath, target.type === "dir"); }}
+            style={menuItemStyle}
+          >
+            <MentionIcon />
+            <span>{t("files.mention")}</span>
+          </button>
+        )}
+
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => { closeMenu(); refreshTree(); }}
+          style={menuItemStyle}
+        >
+          <RefreshTreeIcon />
+          <span>{t("files.refreshExplorer")}</span>
+        </button>
+      </>
+    );
+  };
+
   return (
-    <div style={{ minHeight: "100%" }}>
+    <div
+      style={{ minHeight: "100%" }}
+      onContextMenu={(e) => {
+        if (e.defaultPrevented) return;
+        e.preventDefault();
+        handleOpenContextMenu(e, {
+          type: "background",
+          fullPath: cwd,
+        });
+      }}
+    >
       <input ref={uploadInputRef} type="file" multiple hidden onChange={handleUploadInput} />
       {showUploadFeedback && (
         <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--border)" }}>
@@ -1067,6 +1585,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                     highlightedPaths={highlightedPaths}
                     gitStatusByPath={gitStatusByPath}
                     changedDirectoryPaths={changedDirectoryPaths}
+                    onContextMenu={handleOpenContextMenu}
                     t={t}
                   />
                 ))}
@@ -1100,6 +1619,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
               cwd={cwd}
               onOpenFile={onOpenFile}
               onAtMention={onAtMention}
+              onContextMenu={handleOpenContextMenu}
               t={t}
             />
           ))}
@@ -1127,6 +1647,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                 highlightedPaths={highlightedPaths}
                 gitStatusByPath={gitStatusByPath}
                 changedDirectoryPaths={changedDirectoryPaths}
+                onContextMenu={handleOpenContextMenu}
                 t={t}
               />
             ))
@@ -1137,6 +1658,84 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
             </div>
           )}
         </div>
+      )}
+
+      {contextMenu && menuPos && createPortal(
+        <>
+          <div
+            ref={menuRef}
+            className="native-popover file-context-menu"
+            role="menu"
+            onClick={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.preventDefault()}
+            style={{
+              position: "fixed",
+              top: menuPos.top,
+              left: menuPos.left,
+              width: 200,
+              zIndex: 1000,
+              padding: 5,
+              display: "flex",
+              flexDirection: "column",
+              gap: 1,
+            }}
+          >
+            {renderContextMenuItems()}
+          </div>
+
+          {submenuOpen && (
+            <div
+              ref={submenuRef}
+              className="native-popover file-context-submenu"
+              role="menu"
+              onMouseEnter={handleSubmenuMouseEnter}
+              onMouseLeave={handleSubmenuMouseLeave}
+              onClick={(e) => e.stopPropagation()}
+              onContextMenu={(e) => e.preventDefault()}
+              style={{
+                position: "fixed",
+                top: getSubmenuPosition().top,
+                left: getSubmenuPosition().left,
+                width: 195,
+                zIndex: 1001,
+                padding: 5,
+                display: "flex",
+                flexDirection: "column",
+                gap: 1,
+              }}
+            >
+              {renderSubmenuItems()}
+            </div>
+          )}
+        </>,
+        document.body
+      )}
+
+      {toastMessage && createPortal(
+        <div
+          role="status"
+          style={{
+            position: "fixed",
+            bottom: 26,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 1100,
+            maxWidth: "80vw",
+            background: "color-mix(in srgb, var(--bg-panel) 94%, #000)",
+            color: "var(--text)",
+            border: "1px solid var(--border)",
+            padding: "8px 14px",
+            borderRadius: 8,
+            fontSize: 12,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
+            overflowWrap: "anywhere",
+            pointerEvents: "none",
+            animation: "native-popover-in 140ms ease both",
+          }}
+        >
+          {toastMessage}
+        </div>,
+        document.body
       )}
     </div>
   );

@@ -1,3 +1,4 @@
+import { spawn } from "child_process";
 import { NextRequest, NextResponse } from "next/server";
 import { readTextPreviewChunk } from "@/lib/text-preview";
 import fs from "fs";
@@ -31,7 +32,7 @@ import {
   RequestBodyTooLargeError,
 } from "@/lib/bounded-form-data";
 import { isDesktopApiRequestAllowed } from "@/lib/desktop-api-auth";
-import { filePathFromApiSegments, isWindowsAbsolutePath, samePath } from "@/lib/paths";
+import { filePathFromApiSegments, isWindowsAbsolutePath, samePath, toNativePath, toSlashPath } from "@/lib/paths";
 
 const IGNORED_NAMES = new Set([
   "node_modules", ".git", ".next", "dist", "build", "__pycache__",
@@ -171,10 +172,92 @@ export async function POST(
 
   try {
     const { path: segments } = await params;
+    const type = request.nextUrl.searchParams.get("type") ?? "upload";
+
+    if (type === "reveal") {
+      const filePath = filePathFromApiSegments(segments);
+      const allowedRoots = await getAllowedFileRoots();
+      if (!isFilePathAllowed(filePath, allowedRoots)) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
+
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(filePath);
+      } catch {
+        return NextResponse.json({ error: "File or directory not found" }, { status: 404 });
+      }
+
+      if (!isExistingFilePathAllowed(filePath, allowedRoots)) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
+
+      try {
+        if (process.platform === "win32") {
+          let winPath = toNativePath(filePath);
+          if (winPath.startsWith("\\") && /^[a-zA-Z]:/.test(winPath.slice(1))) {
+            winPath = winPath.slice(1);
+          }
+          const isRoot = allowedRoots.has(toSlashPath(filePath));
+          const args = isRoot ? [winPath] : [`/select,${winPath}`];
+          spawn("explorer.exe", args, { detached: true, stdio: "ignore" }).unref();
+        } else if (process.platform === "darwin") {
+          spawn("/usr/bin/open", ["-R", filePath], { detached: true, stdio: "ignore" }).unref();
+        } else {
+          const target = stat.isDirectory() ? filePath : path.dirname(filePath);
+          spawn("xdg-open", [target], { detached: true, stdio: "ignore" }).unref();
+        }
+        return NextResponse.json({ ok: true });
+      } catch (err) {
+        return NextResponse.json(
+          { error: err instanceof Error ? err.message : String(err) },
+          { status: 500 }
+        );
+      }
+    }
+
+    if (type === "open") {
+      const filePath = filePathFromApiSegments(segments);
+      const allowedRoots = await getAllowedFileRoots();
+      if (!isFilePathAllowed(filePath, allowedRoots)) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
+
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(filePath);
+      } catch {
+        return NextResponse.json({ error: "File or directory not found" }, { status: 404 });
+      }
+
+      if (!isExistingFilePathAllowed(filePath, allowedRoots)) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
+
+      try {
+        if (process.platform === "win32") {
+          let winPath = toNativePath(filePath);
+          if (winPath.startsWith("\\") && /^[a-zA-Z]:/.test(winPath.slice(1))) {
+            winPath = winPath.slice(1);
+          }
+          spawn("rundll32.exe", ["url.dll,FileProtocolHandler", winPath], { detached: true, stdio: "ignore" }).unref();
+        } else if (process.platform === "darwin") {
+          spawn("/usr/bin/open", [filePath], { detached: true, stdio: "ignore" }).unref();
+        } else {
+          spawn("xdg-open", [filePath], { detached: true, stdio: "ignore" }).unref();
+        }
+        return NextResponse.json({ ok: true });
+      } catch (err) {
+        return NextResponse.json(
+          { error: err instanceof Error ? err.message : String(err) },
+          { status: 500 }
+        );
+      }
+    }
+
     const uploadDirectory = await getUploadDirectory(segments);
     if ("response" in uploadDirectory) return uploadDirectory.response;
     const { directory } = uploadDirectory;
-    const type = request.nextUrl.searchParams.get("type") ?? "upload";
 
     if (type === "upload-check") {
       const body = await request.json().catch(() => null) as { fileNames?: unknown } | null;

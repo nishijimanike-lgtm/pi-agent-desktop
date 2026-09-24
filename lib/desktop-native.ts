@@ -155,20 +155,38 @@ export async function openExternal(url: string): Promise<void> {
 
 /** Open a local path with the OS default application. */
 export async function openPathNative(path: string): Promise<void> {
-  if (!isTauriDesktop()) {
-    throw new Error("Opening local paths is only available in the desktop app.");
+  if (isTauriDesktop()) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("open_path", { path });
+    return;
   }
-  const { invoke } = await import("@tauri-apps/api/core");
-  await invoke("open_path", { path });
+  const { encodeFilePathForApi } = await import("@/lib/file-paths");
+  const encoded = encodeFilePathForApi(path);
+  const response = await fetch(`/api/files/${encoded}?type=open`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({})) as { error?: string };
+    throw new Error(data.error || `Failed to open path (HTTP ${response.status})`);
+  }
 }
 
 /** Reveal a local path in Finder / Explorer / file manager. */
 export async function revealItemInDirNative(path: string): Promise<void> {
-  if (!isTauriDesktop()) {
-    throw new Error("Reveal in folder is only available in the desktop app.");
+  if (isTauriDesktop()) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("reveal_item_in_dir", { path });
+    return;
   }
-  const { invoke } = await import("@tauri-apps/api/core");
-  await invoke("reveal_item_in_dir", { path });
+  const { encodeFilePathForApi } = await import("@/lib/file-paths");
+  const encoded = encodeFilePathForApi(path);
+  const response = await fetch(`/api/files/${encoded}?type=reveal`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({})) as { error?: string };
+    throw new Error(data.error || `Failed to reveal path (HTTP ${response.status})`);
+  }
 }
 
 function triggerBrowserDownload(url: string, fileName?: string): void {
