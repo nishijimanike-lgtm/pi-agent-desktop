@@ -26,7 +26,7 @@ import { UpdateReminder } from "./UpdateReminder";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile, useIsNarrowMobile } from "@/hooks/useIsMobile";
-import { APP_PREF_KEYS, getPrefBool, getPrefJson, setPrefJson } from "@/lib/app-prefs";
+import { APP_PREF_KEYS, getPref, setPref, getPrefBool, getPrefJson, setPrefJson } from "@/lib/app-prefs";
 import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useDesktopConnection } from "@/lib/desktop-connection";
@@ -95,11 +95,15 @@ type AutoNameStatus =
   | { kind: "error"; message: string };
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
 const FILE_TREE_DEFAULT_WIDTH = 300;
+const FILE_TREE_DEFAULT_HEIGHT = 280;
 const LANGUAGE_MENU_WIDTH = 176;
 const AGENT_PANEL_WIDTH = 420;
 const FILE_TREE_MIN_WIDTH = 220;
 const FILE_TREE_MAX_WIDTH = 520;
 const FILE_TREE_PREVIEW_MIN_WIDTH = 240;
+const FILE_TREE_MIN_HEIGHT = 160;
+const FILE_TREE_MAX_HEIGHT = 600;
+const FILE_TREE_PREVIEW_MIN_HEIGHT = 180;
 
 function parkedNewSessionDraftKey(cwd: string): string {
   return `parked-new:${cwd}`;
@@ -235,6 +239,18 @@ export function AppShell() {
   const sidebarWidthRef = useRef(SIDEBAR_DEFAULT_WIDTH);
   const rightPanelWidthRef = useRef(RIGHT_PANEL_FALLBACK_WIDTH);
   const fileTreeWidthRef = useRef(FILE_TREE_DEFAULT_WIDTH);
+  const fileTreeHeightRef = useRef(FILE_TREE_DEFAULT_HEIGHT);
+  const [filePanelLayout, setFilePanelLayout] = useState<"horizontal" | "vertical">(() => {
+    const saved = getPref(APP_PREF_KEYS.filePanelLayout);
+    return saved === "vertical" ? "vertical" : "horizontal";
+  });
+  const toggleFilePanelLayout = useCallback(() => {
+    setFilePanelLayout((prev) => {
+      const next = prev === "horizontal" ? "vertical" : "horizontal";
+      setPref(APP_PREF_KEYS.filePanelLayout, next);
+      return next;
+    });
+  }, []);
   const getResponsiveRightPanelWidth = useCallback(
     () => typeof window === "undefined"
       ? RIGHT_PANEL_FALLBACK_WIDTH
@@ -303,6 +319,20 @@ export function AppShell() {
     },
     [],
   );
+  const getFileTreeMaxHeight = useCallback(
+    () => {
+      if (typeof window === "undefined") return FILE_TREE_MAX_HEIGHT;
+      const availablePanelHeight = window.innerHeight - 80;
+      return Math.max(
+        FILE_TREE_MIN_HEIGHT,
+        Math.min(
+          FILE_TREE_MAX_HEIGHT,
+          availablePanelHeight - FILE_TREE_PREVIEW_MIN_HEIGHT,
+        ),
+      );
+    },
+    [],
+  );
   const fileTreeResizer = useResizablePanel({
     ariaLabel: translate("layout.resizeFileTree"),
     cssVariable: "--file-tree-width",
@@ -313,6 +343,18 @@ export function AppShell() {
     minWidth: FILE_TREE_MIN_WIDTH,
     storageKey: "pi-file-tree-width",
     widthRef: fileTreeWidthRef,
+  });
+  const fileTreeHeightResizer = useResizablePanel({
+    ariaLabel: translate("layout.resizeFileTreeHeight"),
+    axis: "vertical",
+    cssVariable: "--file-tree-height",
+    defaultWidth: FILE_TREE_DEFAULT_HEIGHT,
+    getMaxWidth: getFileTreeMaxHeight,
+    growthDirection: "up",
+    maxWidth: FILE_TREE_MAX_HEIGHT,
+    minWidth: FILE_TREE_MIN_HEIGHT,
+    storageKey: "pi-file-tree-height",
+    widthRef: fileTreeHeightRef,
   });
   const reclampSidebarWidth = sidebarResizer.reclampWidth;
   const reclampRightPanelWidth = rightPanelResizer.reclampWidth;
@@ -2774,6 +2816,34 @@ export function AppShell() {
               </svg>
             </button>
           )}
+          {activeCwd && fileTreeOpen && (
+            <button
+              type="button"
+              onClick={toggleFilePanelLayout}
+              title={translate(filePanelLayout === "vertical" ? "files.layoutHorizontal" : "files.layoutVertical")}
+              aria-label={translate(filePanelLayout === "vertical" ? "files.layoutHorizontal" : "files.layoutVertical")}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, padding: 0,
+                background: "none",
+                border: "none", borderLeft: "1px solid var(--border)",
+                color: "var(--text-muted)",
+                cursor: "pointer", flexShrink: 0, transition: "color 0.12s, background 0.12s",
+              }}
+              onMouseEnter={(event) => { event.currentTarget.style.color = "var(--accent)"; }}
+              onMouseLeave={(event) => { event.currentTarget.style.color = "var(--text-muted)"; }}
+            >
+              {filePanelLayout === "vertical" ? (
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="12" y1="3" x2="12" y2="21" />
+                </svg>
+              ) : (
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="12" x2="21" y2="12" />
+                </svg>
+              )}
+            </button>
+          )}
           <button
             type="button"
             className="file-panel-expand-button"
@@ -2812,8 +2882,15 @@ export function AppShell() {
         </div>
 
         {/* Only the active viewer is mounted. Lightweight per-tab state is restored on activation. */}
-        <div style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
-        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        <div style={{
+          flex: 1,
+          minHeight: 0,
+          display: "flex",
+          flexDirection: filePanelLayout === "vertical" ? "column" : "row",
+          overflow: "hidden",
+          paddingBottom: "env(safe-area-inset-bottom)",
+        }}>
+        <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
           {activeFileTab?.filePath ? (
             <FileViewer
               key={`${activeFileTab.id}:${activeFileTab.viewerRevision ?? 0}`}
@@ -2856,96 +2933,187 @@ export function AppShell() {
           ))}
         </div>
       
-        {/* Explorer column — always-on project file tree */}
+        {/* Explorer column / row — always-on project file tree */}
           {activeCwd && fileTreeOpen && (
-            <>
-              <div
-                {...fileTreeResizer.separatorProps}
-                aria-controls="file-tree-panel"
-                className={`panel-resize-handle file-tree-resize-handle${fileTreeResizer.isResizing ? " is-resizing" : ""}`}
-                data-resize-handle="file-tree"
-                title={`${translate("layout.resizeFileTree")}: ${translate("layout.resizeHint")}`}
-              />
-              <div
-                ref={fileTreeResizer.panelRef}
-                id="file-tree-panel"
-                className="file-tree-panel"
-                style={{ "--file-tree-width": `${fileTreeResizer.width}px` } as React.CSSProperties}
-              >
-              <div className="context-panel-files-toolbar">
-                <div className="context-panel-file-filter-wrap">
-                  <input
-                    className="context-panel-file-filter"
-                    value={fileExplorerQuery}
-                    onChange={(event) => setFileExplorerQuery(event.target.value)}
-                    placeholder={translate("sidebar.filterFiles")}
-                    aria-label={translate("sidebar.filterFiles")}
-                    spellCheck={false}
-                  />
-                </div>
-                {changesCount > 0 && (
+            filePanelLayout === "vertical" ? (
+              <>
+                <div
+                  {...fileTreeHeightResizer.separatorProps}
+                  aria-controls="file-tree-panel"
+                  className={`panel-resize-handle file-tree-resize-handle file-tree-resize-handle-vertical${fileTreeHeightResizer.isResizing ? " is-resizing" : ""}`}
+                  data-resize-handle="file-tree-vertical"
+                  title={`${translate("layout.resizeFileTreeHeight")}: ${translate("layout.resizeHeightHint")}`}
+                />
+                <div
+                  ref={fileTreeHeightResizer.panelRef}
+                  id="file-tree-panel"
+                  className="file-tree-panel is-vertical"
+                  style={{ "--file-tree-height": `${fileTreeHeightResizer.width}px` } as React.CSSProperties}
+                >
+                <div className="context-panel-files-toolbar">
+                  <div className="context-panel-file-filter-wrap">
+                    <input
+                      className="context-panel-file-filter"
+                      value={fileExplorerQuery}
+                      onChange={(event) => setFileExplorerQuery(event.target.value)}
+                      placeholder={translate("sidebar.filterFiles")}
+                      aria-label={translate("sidebar.filterFiles")}
+                      spellCheck={false}
+                    />
+                  </div>
+                  {changesCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setChangesCollapsed((v) => !v)}
+                      title={translate("sidebar.changedFiles", { count: changesCount })}
+                      aria-pressed={!changesCollapsed}
+                      style={{
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        width: 26, height: 26, padding: 0,
+                        background: changesCollapsed ? "none" : "var(--bg-selected)",
+                        border: "none",
+                        color: changesCollapsed ? "var(--text-dim)" : "var(--accent)",
+                        cursor: "pointer", borderRadius: 5,
+                      }}
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="3" />
+                        <path d="M3 12h6" />
+                        <path d="M15 12h6" />
+                      </svg>
+                    </button>
+                  )}
                   <button
                     type="button"
-                    onClick={() => setChangesCollapsed((v) => !v)}
-                    title={translate("sidebar.changedFiles", { count: changesCount })}
-                    aria-pressed={!changesCollapsed}
+                    onClick={() => fileExplorerRef.current?.openUploadPicker()}
+                    disabled={explorerUploadBusy}
+                    title={translate("sidebar.uploadFilesTitle")}
                     style={{
                       display: "flex", alignItems: "center", justifyContent: "center",
                       width: 26, height: 26, padding: 0,
-                      background: changesCollapsed ? "none" : "var(--bg-selected)",
-                      border: "none",
-                      color: changesCollapsed ? "var(--text-dim)" : "var(--accent)",
-                      cursor: "pointer", borderRadius: 5,
+                      background: "none", border: "none",
+                      color: "var(--text-dim)", cursor: "pointer", borderRadius: 5,
+                      opacity: explorerUploadBusy ? 0.6 : 1,
                     }}
                   >
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                      <circle cx="12" cy="12" r="3" />
-                      <path d="M3 12h6" />
-                      <path d="M15 12h6" />
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <path d="m17 8-5-5-5 5" />
+                      <path d="M12 3v12" />
                     </svg>
                   </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => fileExplorerRef.current?.openUploadPicker()}
-                  disabled={explorerUploadBusy}
-                  title={translate("sidebar.uploadFilesTitle")}
-                  style={{
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    width: 26, height: 26, padding: 0,
-                    background: "none", border: "none",
-                    color: "var(--text-dim)", cursor: "pointer", borderRadius: 5,
-                    opacity: explorerUploadBusy ? 0.6 : 1,
-                  }}
-                >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <path d="m17 8-5-5-5 5" />
-                    <path d="M12 3v12" />
-                  </svg>
-                </button>
-              </div>
-              <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
-                <FileExplorer
-                  ref={fileExplorerRef}
-                  cwd={activeCwd}
-                  onOpenFile={handleOpenFile}
-                  selectedFilePath={activeFileTab?.filePath ?? null}
-                  refreshKey={explorerKey}
-                  onAtMention={(rel, isDir) => {
-                    chatInputRef.current?.insertText(buildAtMentionText(rel, isDir));
-                  }}
-                  onAtMentions={(rels) => {
-                    const mentions = buildFileAtMentionsText(rels);
-                    if (mentions) chatInputRef.current?.insertText(mentions);
-                  }}
-                  onUploadBusyChange={setExplorerUploadBusy}
-                  changesCollapsed={changesCollapsed}
-                  onChangesCountChange={setChangesCount}
+                </div>
+                <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
+                  <FileExplorer
+                    ref={fileExplorerRef}
+                    cwd={activeCwd}
+                    onOpenFile={handleOpenFile}
+                    selectedFilePath={activeFileTab?.filePath ?? null}
+                    refreshKey={explorerKey}
+                    onAtMention={(rel, isDir) => {
+                      chatInputRef.current?.insertText(buildAtMentionText(rel, isDir));
+                    }}
+                    onAtMentions={(rels) => {
+                      const mentions = buildFileAtMentionsText(rels);
+                      if (mentions) chatInputRef.current?.insertText(mentions);
+                    }}
+                    onUploadBusyChange={setExplorerUploadBusy}
+                    changesCollapsed={changesCollapsed}
+                    onChangesCountChange={setChangesCount}
+                  />
+                </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div
+                  {...fileTreeResizer.separatorProps}
+                  aria-controls="file-tree-panel"
+                  className={`panel-resize-handle file-tree-resize-handle${fileTreeResizer.isResizing ? " is-resizing" : ""}`}
+                  data-resize-handle="file-tree"
+                  title={`${translate("layout.resizeFileTree")}: ${translate("layout.resizeHint")}`}
                 />
-              </div>
-              </div>
-            </>
+                <div
+                  ref={fileTreeResizer.panelRef}
+                  id="file-tree-panel"
+                  className="file-tree-panel"
+                  style={{ "--file-tree-width": `${fileTreeResizer.width}px` } as React.CSSProperties}
+                >
+                <div className="context-panel-files-toolbar">
+                  <div className="context-panel-file-filter-wrap">
+                    <input
+                      className="context-panel-file-filter"
+                      value={fileExplorerQuery}
+                      onChange={(event) => setFileExplorerQuery(event.target.value)}
+                      placeholder={translate("sidebar.filterFiles")}
+                      aria-label={translate("sidebar.filterFiles")}
+                      spellCheck={false}
+                    />
+                  </div>
+                  {changesCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setChangesCollapsed((v) => !v)}
+                      title={translate("sidebar.changedFiles", { count: changesCount })}
+                      aria-pressed={!changesCollapsed}
+                      style={{
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        width: 26, height: 26, padding: 0,
+                        background: changesCollapsed ? "none" : "var(--bg-selected)",
+                        border: "none",
+                        color: changesCollapsed ? "var(--text-dim)" : "var(--accent)",
+                        cursor: "pointer", borderRadius: 5,
+                      }}
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="3" />
+                        <path d="M3 12h6" />
+                        <path d="M15 12h6" />
+                      </svg>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => fileExplorerRef.current?.openUploadPicker()}
+                    disabled={explorerUploadBusy}
+                    title={translate("sidebar.uploadFilesTitle")}
+                    style={{
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      width: 26, height: 26, padding: 0,
+                      background: "none", border: "none",
+                      color: "var(--text-dim)", cursor: "pointer", borderRadius: 5,
+                      opacity: explorerUploadBusy ? 0.6 : 1,
+                    }}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <path d="m17 8-5-5-5 5" />
+                      <path d="M12 3v12" />
+                    </svg>
+                  </button>
+                </div>
+                <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
+                  <FileExplorer
+                    ref={fileExplorerRef}
+                    cwd={activeCwd}
+                    onOpenFile={handleOpenFile}
+                    selectedFilePath={activeFileTab?.filePath ?? null}
+                    refreshKey={explorerKey}
+                    onAtMention={(rel, isDir) => {
+                      chatInputRef.current?.insertText(buildAtMentionText(rel, isDir));
+                    }}
+                    onAtMentions={(rels) => {
+                      const mentions = buildFileAtMentionsText(rels);
+                      if (mentions) chatInputRef.current?.insertText(mentions);
+                    }}
+                    onUploadBusyChange={setExplorerUploadBusy}
+                    changesCollapsed={changesCollapsed}
+                    onChangesCountChange={setChangesCount}
+                  />
+                </div>
+                </div>
+              </>
+            )
           )}
       </div>
       </div>
