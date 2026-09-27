@@ -5,7 +5,7 @@ import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import { validateAgentImages } from "./image-attachments";
-import { invalidateModelsCache } from "./models-cache";
+import { invalidateModelsCache, onModelsCacheInvalidated } from "./models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import {
   createProjectCommandBashExtension,
@@ -346,7 +346,7 @@ export class AgentSessionWrapper {
       // running set itself is unchanged.
       if (event.type === "session_info_changed") {
         invalidateSessionListCache();
-        notifyRunningChange();
+        notifyRunningChange(true);
       }
       const toolCallId = event.toolCallId;
       if (typeof toolCallId === "string") {
@@ -2015,7 +2015,7 @@ let lastRunningSnapshot = "";
  * Recompute the running-session-id set and, if it changed since the last
  * notification, broadcast it to subscribers.
  */
-export function notifyRunningChange(): void {
+export function notifyRunningChange(force = false): void {
   const listeners = getRunningListeners();
   if (listeners.size === 0) {
     // A future subscriber receives its own initial snapshot. Clear this one so
@@ -2025,11 +2025,21 @@ export function notifyRunningChange(): void {
   }
   const ids = getRunningRpcSessionIds();
   const snapshot = JSON.stringify([...ids].sort());
-  if (snapshot === lastRunningSnapshot) return;
+  if (!force && snapshot === lastRunningSnapshot) return;
   lastRunningSnapshot = snapshot;
   for (const listener of listeners) {
     try { listener(ids); } catch { /* ignore listener errors */ }
   }
+}
+
+declare global {
+  var __piModelsChangeSubscribed: boolean | undefined;
+}
+if (!globalThis.__piModelsChangeSubscribed) {
+  globalThis.__piModelsChangeSubscribed = true;
+  onModelsCacheInvalidated(() => {
+    notifyRunningChange(true);
+  });
 }
 
 export function getRunningRpcSessionIds(): string[] {

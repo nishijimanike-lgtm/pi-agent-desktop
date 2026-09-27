@@ -15,10 +15,13 @@ export interface ModelsData {
   modelScopeWarnings?: ModelScopeWarning[];
 }
 
+export type ModelsCacheInvalidationListener = () => void;
+
 interface ModelsCacheState {
   entries: Map<string, { data: ModelsData; expiresAt: number }>;
   inFlight: Map<string, Promise<ModelsData>>;
   generation: number;
+  listeners: Set<ModelsCacheInvalidationListener>;
 }
 
 declare global {
@@ -36,9 +39,25 @@ function getModelsCacheState(): ModelsCacheState {
       entries: new Map(),
       inFlight: new Map(),
       generation: 0,
+      listeners: new Set(),
     };
   }
+  if (!globalThis.__piModelsCacheState.listeners) {
+    globalThis.__piModelsCacheState.listeners = new Set();
+  }
   return globalThis.__piModelsCacheState;
+}
+
+export function getModelsVersion(): number {
+  return getModelsCacheState().generation;
+}
+
+export function onModelsCacheInvalidated(listener: ModelsCacheInvalidationListener): () => void {
+  const state = getModelsCacheState();
+  state.listeners.add(listener);
+  return () => {
+    state.listeners.delete(listener);
+  };
 }
 
 export function invalidateModelsCache(): void {
@@ -46,6 +65,13 @@ export function invalidateModelsCache(): void {
   state.generation += 1;
   state.entries.clear();
   state.inFlight.clear();
+  for (const listener of state.listeners) {
+    try {
+      listener();
+    } catch {
+      // Listener errors must not crash caller
+    }
+  }
 }
 
 export function withModelRuntimeError(data: ModelsData, modelError: string | undefined): ModelsData {
