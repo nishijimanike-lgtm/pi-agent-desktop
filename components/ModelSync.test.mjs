@@ -9,7 +9,7 @@ const useAgentSessionSource = await readFile(new URL("../hooks/useAgentSession.t
 test("SessionSidebar exposes onModelsVersionChange and forwards modelsVersion from SSE", () => {
   assert.match(sessionSidebarSource, /onModelsVersionChange\?: \(version: number\) => void/);
   assert.match(sessionSidebarSource, /data\.modelsVersion/);
-  assert.match(sessionSidebarSource, /onModelsVersionChange\?\.\(data\.modelsVersion\)/);
+  assert.match(sessionSidebarSource, /onModelsVersionChange(?:Ref\.current)?\?\.\(data\.modelsVersion\)/);
 });
 
 test("AppShell tracks modelsVersion and increments modelsRefreshKey on version changes", () => {

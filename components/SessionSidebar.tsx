@@ -379,6 +379,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     setPrefJson(APP_PREF_KEYS.archivedProjects, [...archivedProjectRoots]);
   }, [archivedProjectRoots]);
 
+  const onModelsVersionChangeRef = useRef(onModelsVersionChange);
+  useEffect(() => {
+    onModelsVersionChangeRef.current = onModelsVersionChange;
+  }, [onModelsVersionChange]);
+
   useEffect(() => {
     // Live running status via SSE — no polling. The server pushes the current
     // set of running session ids whenever any session starts/stops working.
@@ -409,7 +414,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             await loadSessions();
           }
           if (typeof data.modelsVersion === "number") {
-            onModelsVersionChange?.(data.modelsVersion);
+            onModelsVersionChangeRef.current?.(data.modelsVersion);
           }
         } catch {
           // ignore malformed frames
