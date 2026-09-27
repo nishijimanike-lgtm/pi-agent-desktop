@@ -5,14 +5,14 @@ import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import { validateAgentImages } from "./image-attachments";
-import { invalidateModelsCache, onModelsCacheInvalidated } from "./models-cache";
+import { getModelsVersion, invalidateModelsCache, onModelsCacheInvalidated } from "./models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import {
   createProjectCommandBashExtension,
   createProjectCommandBashOperations,
   preferUserBashExtension,
 } from "./project-command-env";
-import { cacheSessionPath, getLatestModelChange, invalidateSessionListCache, readLatestSessionEntryId, resolveSessionPath } from "./session-reader";
+import { cacheSessionPath, getLatestModelChange, getSessionListVersion, invalidateSessionListCache, readLatestSessionEntryId, resolveSessionPath } from "./session-reader";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
 import { persistExplicitStartupPreferences } from "./startup-preferences";
 import { notifySessionComplete } from "./web-push";
@@ -346,7 +346,7 @@ export class AgentSessionWrapper {
       // running set itself is unchanged.
       if (event.type === "session_info_changed") {
         invalidateSessionListCache();
-        notifyRunningChange(true);
+        notifyRunningChange();
       }
       const toolCallId = event.toolCallId;
       if (typeof toolCallId === "string") {
@@ -2015,7 +2015,7 @@ let lastRunningSnapshot = "";
  * Recompute the running-session-id set and, if it changed since the last
  * notification, broadcast it to subscribers.
  */
-export function notifyRunningChange(force = false): void {
+export function notifyRunningChange(): void {
   const listeners = getRunningListeners();
   if (listeners.size === 0) {
     // A future subscriber receives its own initial snapshot. Clear this one so
@@ -2024,8 +2024,8 @@ export function notifyRunningChange(force = false): void {
     return;
   }
   const ids = getRunningRpcSessionIds();
-  const snapshot = JSON.stringify([...ids].sort());
-  if (!force && snapshot === lastRunningSnapshot) return;
+  const snapshot = `${getSessionListVersion()}:${getModelsVersion()}:${JSON.stringify([...ids].sort())}`;
+  if (snapshot === lastRunningSnapshot) return;
   lastRunningSnapshot = snapshot;
   for (const listener of listeners) {
     try { listener(ids); } catch { /* ignore listener errors */ }
@@ -2038,7 +2038,7 @@ declare global {
 if (!globalThis.__piModelsChangeSubscribed) {
   globalThis.__piModelsChangeSubscribed = true;
   onModelsCacheInvalidated(() => {
-    notifyRunningChange(true);
+    notifyRunningChange();
   });
 }
 
