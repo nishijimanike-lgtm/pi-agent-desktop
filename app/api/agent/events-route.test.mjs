@@ -18,3 +18,10 @@ test("agent SSE reuses one TextEncoder per stream", () => {
   assert.equal((agentEventStreamSource.match(/new TextEncoder\(\)/g) ?? []).length, 1);
   assert.match(agentEventStreamSource, /controller\.enqueue\(encoder\.encode\(/);
 });
+
+const runningEventsSource = await readFile(new URL("./running/events/route.ts", import.meta.url), "utf8");
+
+test("running-events SSE broadcasts modelsVersion and starts models watcher", () => {
+  assert.match(runningEventsSource, /ensureModelsWatcherStarted\(\)/);
+  assert.match(runningEventsSource, /modelsVersion:\s*getModelsVersion\(\)/);
+});

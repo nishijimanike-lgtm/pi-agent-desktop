@@ -13,6 +13,8 @@ export interface ModelsData {
   modelError?: string;
   /** Warnings from resolving the `enabledModels` scope (e.g. a pattern matched nothing). */
   modelScopeWarnings?: ModelScopeWarning[];
+  /** Server-side models configuration generation counter. */
+  modelsVersion?: number;
 }
 
 export type ModelsCacheInvalidationListener = () => void;

@@ -3,11 +3,13 @@ import { resolve } from "path";
 import { createAgentSessionServices, getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import {
+  getModelsVersion,
   loadModelsWithCache,
   withModelRuntimeError,
   withSafeModelLoadFailure,
   type ModelsData,
 } from "@/lib/models-cache";
+import { ensureModelsWatcherStarted } from "@/lib/models-watcher";
 import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
@@ -107,6 +109,7 @@ const EMPTY_MODELS: ModelsData = {
 };
 
 export async function GET(req: Request) {
+  ensureModelsWatcherStarted();
   const requestedCwd = new URL(req.url).searchParams.get("cwd") || process.cwd();
   const cwd = resolve(requestedCwd);
 
@@ -125,8 +128,9 @@ export async function GET(req: Request) {
   }
 
   try {
-    return Response.json(await loadModelsWithCache(cwd, () => loadModels(cwd)));
+    const data = await loadModelsWithCache(cwd, () => loadModels(cwd));
+    return Response.json({ ...data, modelsVersion: getModelsVersion() });
   } catch {
-    return Response.json(withSafeModelLoadFailure(EMPTY_MODELS));
+    return Response.json({ ...withSafeModelLoadFailure(EMPTY_MODELS), modelsVersion: getModelsVersion() });
   }
 }

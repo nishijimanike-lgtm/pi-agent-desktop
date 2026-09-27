@@ -1,5 +1,7 @@
 import { getRunningRpcSessionIds, subscribeRunningSessions } from "@/lib/rpc-manager";
 import { getSessionListVersion } from "@/lib/session-reader";
+import { getModelsVersion } from "@/lib/models-cache";
+import { ensureModelsWatcherStarted } from "@/lib/models-watcher";
 
 export const dynamic = "force-dynamic";
 
@@ -7,6 +9,7 @@ export const dynamic = "force-dynamic";
 // session ids. Pushes an update whenever any session starts or stops working,
 // so the sidebar never has to poll.
 export async function GET(req: Request) {
+  ensureModelsWatcherStarted();
   let dispose = () => {};
   const stream = new ReadableStream({
     start(controller) {
@@ -41,14 +44,24 @@ export async function GET(req: Request) {
       // the session-list version: renames/deletes/creates in other windows bump
       // it, letting connected sidebars refetch without waiting for focus.
       const nextUnsubscribe = subscribeRunningSessions((ids) => {
-        encode({ type: "running", runningSessionIds: ids, sessionListVersion: getSessionListVersion() });
+        encode({
+          type: "running",
+          runningSessionIds: ids,
+          sessionListVersion: getSessionListVersion(),
+          modelsVersion: getModelsVersion(),
+        });
       });
       if (closed) nextUnsubscribe();
       else unsubscribe = nextUnsubscribe;
 
       // Initial snapshot so the client renders the correct state immediately.
       // (A duplicate frame here is harmless: the client just sets the same set.)
-      encode({ type: "running", runningSessionIds: getRunningRpcSessionIds(), sessionListVersion: getSessionListVersion() });
+      encode({
+        type: "running",
+        runningSessionIds: getRunningRpcSessionIds(),
+        sessionListVersion: getSessionListVersion(),
+        modelsVersion: getModelsVersion(),
+      });
 
       // Heartbeat to keep the connection alive through proxies/timeouts.
       if (!closed) heartbeat = setInterval(() => {
