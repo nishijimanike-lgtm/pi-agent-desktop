@@ -1105,6 +1105,16 @@ function DocumentViewer({ filePath, cwd, sourceSessionId, initialPage, watchEnab
   );
 }
 
+// Plugins are resolved once and cached at module level so the array reference
+// is stable across renders — avoiding viewer destroy/recreate on every re-render.
+let _officePlugins: unknown[] | null = null;
+async function getOfficePlugins(): Promise<unknown[]> {
+  if (_officePlugins) return _officePlugins;
+  const mod = await import("@open-file-viewer/core");
+  _officePlugins = [mod.officePlugin()];
+  return _officePlugins;
+}
+
 const OpenFileViewer = dynamic(
   () => import("@open-file-viewer/react").then((mod) => mod.FileViewer),
   {
@@ -1127,30 +1137,34 @@ function OfficeViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: P
   const [error, setError] = useState<string | null>(null);
   const [watching, setWatching] = useState(false);
   const [bust, setBust] = useState(0);
-  const [fallbackMode, setFallbackMode] = useState(false);
-
-  const esRef = useRef<EventSource | null>(null);
-  const ext = getFileExt(filePath);
-  const fileName = getFileName(filePath);
+  const [fallbackMode, setFallbackMode] = useState(true);
   const [plugins, setPlugins] = useState<unknown[] | null>(null);
 
+  const esRef = useRef<EventSource | null>(null);
+  // Stable onError ref — keeps the viewer from being destroyed when the
+  // callback identity changes between renders.
+  const onErrorRef = useRef<(err: unknown) => void>(() => undefined);
+  onErrorRef.current = (err: unknown) => {
+    console.warn("open-file-viewer render error, switching to HTML fallback:", err);
+    setFallbackMode(true);
+  };
+  // Stable wrapper so open-file-viewer's useEffect dep never changes.
+  const stableOnError = useCallback((err: unknown) => onErrorRef.current(err), []);
+
+  const ext = getFileExt(filePath);
+  const fileName = getFileName(filePath);
+
+  // Load plugins once and reuse the stable module-level cache so the plugins
+  // reference never changes between renders (avoids viewer destroy/recreate).
   useEffect(() => {
     let active = true;
-    import("@open-file-viewer/core")
-      .then((mod) => {
-        if (active) {
-          setPlugins([mod.officePlugin()]);
-        }
-      })
+    getOfficePlugins()
+      .then((p) => { if (active) setPlugins(p); })
       .catch((err) => {
         console.warn("Failed to load officePlugin:", err);
-        if (active) {
-          setFallbackMode(true);
-        }
+        // Already in fallbackMode by default — nothing extra needed.
       });
-    return () => {
-      active = false;
-    };
+    return () => { active = false; };
   }, []);
 
   useEffect(() => {
@@ -1178,9 +1192,7 @@ function OfficeViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: P
         setLoading(false);
       });
 
-    return () => {
-      active = false;
-    };
+    return () => { active = false; };
   }, [filePath, sourceSessionId, bust]);
 
   useEffect(() => {
@@ -1194,18 +1206,11 @@ function OfficeViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: P
     const es = new EventSource(getFileApiUrl(filePath, "watch", sourceSessionId));
     esRef.current = es;
 
-    es.addEventListener("connected", () => {
-      setWatching(true);
-    });
-    es.addEventListener("change", () => {
-      setBust((b) => b + 1);
-    });
-    es.addEventListener("error", () => {
-      setWatching(false);
-    });
-    es.onerror = () => {
-      setWatching(false);
-    };
+    es.addEventListener("connected", () => { setWatching(true); });
+    es.addEventListener("change", () => { setBust((b) => b + 1); });
+    const markDisconnected = () => { setWatching(false); };
+    es.addEventListener("error", markDisconnected);
+    es.onerror = markDisconnected;
 
     return () => {
       es.close();
@@ -1248,7 +1253,7 @@ function OfficeViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: P
       </FileViewerToolbar>
 
       <div className="file-viewer-document-stage" style={{ height: "calc(100% - 40px)", overflow: "hidden" }}>
-        {loading || (!fallbackMode && !plugins && !error) ? (
+        {loading ? (
           <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, color: "var(--text-dim)", fontSize: 13 }}>
             <span className="file-viewer-spinner" aria-hidden="true" />
             <span>Loading {ext.toUpperCase()} document…</span>
@@ -1284,7 +1289,10 @@ function OfficeViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: P
             }}
           />
         ) : data && plugins ? (
-          <div style={{ width: "100%", height: "100%", overflow: "hidden" }}>
+          // key=filePath ensures the viewer fully reinitialises only when the
+          // file changes — not on theme/mode toggles — which keeps sheet
+          // selection and scroll position stable during the same session.
+          <div key={filePath} style={{ width: "100%", height: "100%", overflow: "hidden" }}>
             <OpenFileViewer
               file={data}
               fileName={fileName}
@@ -1292,14 +1300,15 @@ function OfficeViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: P
               height="100%"
               fit="contain"
               toolbar={true}
-              theme={isDark ? "dark" : "light"}
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               plugins={plugins as any}
-              onError={(err) => {
-                console.warn("open-file-viewer render error, switching to HTML fallback:", err);
-                setFallbackMode(true);
-              }}
+              onError={stableOnError as (err: unknown) => void}
             />
+          </div>
+        ) : data && !plugins ? (
+          <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, color: "var(--text-dim)", fontSize: 13 }}>
+            <span className="file-viewer-spinner" aria-hidden="true" />
+            <span>Loading Office viewer…</span>
           </div>
         ) : null}
       </div>

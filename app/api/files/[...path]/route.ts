@@ -11,6 +11,7 @@ import {
 import {
   DOCX_PREVIEW_MAX_BYTES,
   IMAGE_PREVIEW_MAX_BYTES,
+  OFFICE_EXTENSIONS,
   documentPreviewKind,
   getAudioMime,
   getDocumentMime,
@@ -820,7 +821,9 @@ export async function GET(
         return NextResponse.json({ error: "Not a file" }, { status: 400 });
       }
       const ext = getFileExt(filePath);
-      if (ext !== "docx" && ext !== "doc") {
+
+      const SUPPORTED_PREVIEW_EXTS = new Set(["docx", "doc", "xlsx", "xls", "xlsm"]);
+      if (!SUPPORTED_PREVIEW_EXTS.has(ext) && !OFFICE_EXTENSIONS.has(ext)) {
         return NextResponse.json({ error: "Preview not available for this file type" }, { status: 400 });
       }
       if (stat.size > DOCX_PREVIEW_MAX_BYTES) {
@@ -835,6 +838,7 @@ export async function GET(
         "X-Content-Type-Options": "nosniff",
       };
 
+      // ── .doc (legacy binary Word) ─────────────────────────────────────────────
       if (ext === "doc") {
         try {
           const WordExtractorModule = await import("word-extractor");
@@ -859,19 +863,77 @@ export async function GET(
         }
       }
 
-      const mammoth = await import("mammoth");
-      const result = await mammoth.convertToHtml(
-        { path: filePath },
-        {
-          externalFileAccess: false,
-          convertImage: mammoth.images.dataUri,
+      // ── .xlsx / .xls / .xlsm (Excel) ─────────────────────────────────────────
+      if (ext === "xlsx" || ext === "xls" || ext === "xlsm") {
+        try {
+          const XLSX = await import("xlsx");
+          const fileBuffer = await fs.promises.readFile(filePath);
+          const workbook = XLSX.read(fileBuffer, { type: "buffer", cellHTML: true, cellDates: true });
+          const sheetNames = workbook.SheetNames;
+
+          const tabsCss = `
+            .sheet-tabs { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:12px; border-bottom:2px solid #e5e7eb; padding-bottom:8px; }
+            .sheet-tab { padding:4px 12px; font-size:13px; font-weight:500; color:#374151; background:#f3f4f6; border-radius:4px 4px 0 0; cursor:default; }
+            .sheet-section { margin-bottom:48px; }
+            .sheet-heading { font-size:15px; font-weight:600; color:#374151; margin:0 0 10px; padding-bottom:6px; border-bottom:1px solid #e5e7eb; }
+            table { border-collapse:collapse; width:100%; font-size:13px; }
+            th, td { border:1px solid #d1d5db; padding:5px 8px; white-space:pre-wrap; word-break:break-word; max-width:400px; }
+            th { background:#f9fafb; font-weight:600; text-align:left; }
+            tr:nth-child(even) td { background:#f9fafb; }
+          `;
+
+          const sheetsHtml = sheetNames.map((name) => {
+            const ws = workbook.Sheets[name];
+            const html = XLSX.utils.sheet_to_html(ws, { editable: false });
+            return `<div class="sheet-section"><div class="sheet-heading">${escapeHtml(name)}</div>${html}</div>`;
+          }).join("\n");
+
+          const tabsHtml = sheetNames.length > 1
+            ? `<div class="sheet-tabs">${sheetNames.map((n) => `<span class="sheet-tab">${escapeHtml(n)}</span>`).join("")}</div>`
+            : "";
+
+          const fullHtml = wrapDocxPreviewHtml(
+            `<style>${tabsCss}</style>${tabsHtml}${sheetsHtml}`,
+            path.basename(filePath)
+          );
+          return new Response(fullHtml, { headers: previewHeaders });
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          const errorHtml = wrapDocxPreviewHtml(
+            `<p style="color:#dc2626;">Failed to preview ${ext.toUpperCase()} file: ${escapeHtml(message)}</p>`,
+            path.basename(filePath)
+          );
+          return new Response(errorHtml, { headers: previewHeaders });
         }
+      }
+
+      // ── .docx / .dotx (modern Word) ──────────────────────────────────────────
+      if (ext === "docx" || ext === "dotx") {
+        const mammoth = await import("mammoth");
+        const result = await mammoth.convertToHtml(
+          { path: filePath },
+          {
+            externalFileAccess: false,
+            convertImage: mammoth.images.dataUri,
+          }
+        );
+        const html = wrapDocxPreviewHtml(result.value, path.basename(filePath));
+        return new Response(html, { headers: previewHeaders });
+      }
+
+      // ── Other Office types (pptx, odt, etc.) — no server-side renderer ───────
+      const friendlyName = ext.toUpperCase();
+      const fallbackHtml = wrapDocxPreviewHtml(
+        `<p style="text-align:center;color:#6b7280;margin-top:48px;">
+          <strong>${escapeHtml(path.basename(filePath))}</strong><br><br>
+          HTML preview is not available for ${friendlyName} files.<br>
+          Switch to <em>Interactive View</em> to render this document.
+        </p>`,
+        path.basename(filePath)
       );
-      const html = wrapDocxPreviewHtml(result.value, path.basename(filePath));
-      return new Response(html, {
-        headers: previewHeaders,
-      });
+      return new Response(fallbackHtml, { headers: previewHeaders });
     }
+
 
     if (type === "watch") {
       if (stat && !stat.isFile()) {
