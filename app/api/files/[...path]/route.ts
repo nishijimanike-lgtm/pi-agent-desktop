@@ -103,7 +103,7 @@ const EXT_TO_LANGUAGE: Record<string, string> = {
   sql: "sql", graphql: "graphql", gql: "graphql",
   dockerfile: "dockerfile", tf: "hcl", hcl: "hcl",
   env: "bash", gitignore: "bash", txt: "text",
-  pdf: "pdf", docx: "word",
+  pdf: "pdf", docx: "word", doc: "word",
 };
 
 function getLanguage(filePath: string): string {
@@ -660,6 +660,52 @@ ${bodyHtml}
 </html>`;
 }
 
+interface ExtractedDocLike {
+  getBody?: (options?: { filterUnicode?: boolean }) => string;
+  getHeaders?: () => string;
+  getFooters?: () => string;
+  getFootnotes?: () => string;
+  getTextboxes?: () => string;
+}
+
+function convertDocToHtml(doc: ExtractedDocLike, fileName: string): string {
+  const parts: string[] = [];
+  const headers = typeof doc.getHeaders === "function" ? doc.getHeaders().trim() : "";
+  if (headers) {
+    parts.push(headers);
+  }
+  const body = typeof doc.getBody === "function" ? doc.getBody({ filterUnicode: false }).trim() : "";
+  if (body) {
+    parts.push(body);
+  }
+  const textboxes = typeof doc.getTextboxes === "function" ? doc.getTextboxes().trim() : "";
+  if (textboxes && !body.includes(textboxes)) {
+    parts.push(textboxes);
+  }
+  const footnotes = typeof doc.getFootnotes === "function" ? doc.getFootnotes().trim() : "";
+  if (footnotes) {
+    parts.push(`---\nFootnotes:\n${footnotes}`);
+  }
+  const footers = typeof doc.getFooters === "function" ? doc.getFooters().trim() : "";
+  if (footers) {
+    parts.push(footers);
+  }
+
+  if (parts.length === 0) {
+    return wrapDocxPreviewHtml("<p><em>(Empty document)</em></p>", fileName);
+  }
+
+  const rawText = parts.join("\n\n");
+  const paragraphs = rawText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => `<p>${escapeHtml(line)}</p>`)
+    .join("\n");
+
+  return wrapDocxPreviewHtml(paragraphs || "<p><em>(Empty document)</em></p>", fileName);
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ path: string[] }> }
@@ -773,11 +819,44 @@ export async function GET(
       if (!stat?.isFile()) {
         return NextResponse.json({ error: "Not a file" }, { status: 400 });
       }
-      if (getFileExt(filePath) !== "docx") {
+      const ext = getFileExt(filePath);
+      if (ext !== "docx" && ext !== "doc") {
         return NextResponse.json({ error: "Preview not available for this file type" }, { status: 400 });
       }
       if (stat.size > DOCX_PREVIEW_MAX_BYTES) {
-        return NextResponse.json({ error: "DOCX too large for preview (>10MB)" }, { status: 413 });
+        return NextResponse.json({ error: `${ext.toUpperCase()} too large for preview (>10MB)` }, { status: 413 });
+      }
+
+      const previewHeaders = {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-cache",
+        "Content-Security-Policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+      };
+
+      if (ext === "doc") {
+        try {
+          const WordExtractorModule = await import("word-extractor");
+          const ExtractorClass = (
+            typeof WordExtractorModule === "function"
+              ? WordExtractorModule
+              : WordExtractorModule.default
+          ) as unknown as new () => {
+            extract: (path: string) => Promise<ExtractedDocLike>;
+          };
+          const extractor = new ExtractorClass();
+          const extracted = await extractor.extract(filePath);
+          const html = convertDocToHtml(extracted, path.basename(filePath));
+          return new Response(html, { headers: previewHeaders });
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          const errorHtml = wrapDocxPreviewHtml(
+            `<p style="color:#dc2626;">Failed to preview .doc file: ${escapeHtml(message)}</p>`,
+            path.basename(filePath)
+          );
+          return new Response(errorHtml, { headers: previewHeaders });
+        }
       }
 
       const mammoth = await import("mammoth");
@@ -790,13 +869,7 @@ export async function GET(
       );
       const html = wrapDocxPreviewHtml(result.value, path.basename(filePath));
       return new Response(html, {
-        headers: {
-          "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "no-cache",
-          "Content-Security-Policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
-          "Referrer-Policy": "no-referrer",
-          "X-Content-Type-Options": "nosniff",
-        },
+        headers: previewHeaders,
       });
     }
 

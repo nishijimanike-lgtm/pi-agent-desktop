@@ -160,7 +160,7 @@ export function AppShell() {
   }, [playDoneSound, soundEnabledRef]);
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   const [fileActionsMenuOpen, setFileActionsMenuOpen] = useState(false);
-  const [explorerKey, setExplorerKey] = useState(0);
+  const [isRefreshingFiles, setIsRefreshingFiles] = useState(false);
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
   const fileExplorerRef = useRef<FileExplorerHandle>(null);
   const [fileTreeOpen, setFileTreeOpen] = useState(true);
@@ -212,7 +212,9 @@ export function AppShell() {
   }, []);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   const handleExplorerRefresh = useCallback(() => {
+    setIsRefreshingFiles(true);
     setExplorerRefreshKey((key) => key + 1);
+    setTimeout(() => setIsRefreshingFiles(false), 500);
   }, []);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
@@ -901,14 +903,16 @@ export function AppShell() {
       setFileTabs([]);
       if (!activeFileTabId || activeFileTabId.startsWith("file:")) {
         setActiveFileTabId(null);
-        setRightPanelOpen(false);
+        if (!fileTreeOpen) {
+          setRightPanelOpen(false);
+        }
       }
       // Restore the workspace we switched to: its last open session, or keep
       // the default welcome page when none is remembered.
       restoreWorkspaceContext(newProject, cwd);
     }
     router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
-  }, [activeCwd, activeFileTabId, invalidateWorkspaceRestore, newSessionCwd, router, selectedSession, restoreWorkspaceContext]);
+  }, [activeCwd, activeFileTabId, fileTreeOpen, invalidateWorkspaceRestore, newSessionCwd, router, selectedSession, restoreWorkspaceContext]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false, entryId?: string, blockIndex?: number) => {
     setSearchTarget(entryId ? { sessionId: session.id, entryId, blockIndex } : null);
@@ -2993,6 +2997,34 @@ export function AppShell() {
                   )}
                   <button
                     type="button"
+                    onClick={handleExplorerRefresh}
+                    title={translate("sidebar.refreshFiles")}
+                    aria-label={translate("sidebar.refreshFiles")}
+                    style={{
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      width: 26, height: 26, padding: 0,
+                      background: "none", border: "none",
+                      color: "var(--text-dim)", cursor: "pointer", borderRadius: 5,
+                    }}
+                  >
+                    <svg
+                      width="13"
+                      height="13"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      style={isRefreshingFiles ? { animation: "spin 0.6s linear infinite" } : undefined}
+                      aria-hidden="true"
+                    >
+                      <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+                      <path d="M21 3v5h-5" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => fileExplorerRef.current?.openUploadPicker()}
                     disabled={explorerUploadBusy}
                     title={translate("sidebar.uploadFilesTitle")}
@@ -3017,7 +3049,7 @@ export function AppShell() {
                     cwd={activeCwd}
                     onOpenFile={handleOpenFile}
                     selectedFilePath={activeFileTab?.filePath ?? null}
-                    refreshKey={explorerKey}
+                    refreshKey={explorerRefreshKey}
                     onAtMention={(rel, isDir) => {
                       chatInputRef.current?.insertText(buildAtMentionText(rel, isDir));
                     }}
@@ -3082,6 +3114,34 @@ export function AppShell() {
                   )}
                   <button
                     type="button"
+                    onClick={handleExplorerRefresh}
+                    title={translate("sidebar.refreshFiles")}
+                    aria-label={translate("sidebar.refreshFiles")}
+                    style={{
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      width: 26, height: 26, padding: 0,
+                      background: "none", border: "none",
+                      color: "var(--text-dim)", cursor: "pointer", borderRadius: 5,
+                    }}
+                  >
+                    <svg
+                      width="13"
+                      height="13"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      style={isRefreshingFiles ? { animation: "spin 0.6s linear infinite" } : undefined}
+                      aria-hidden="true"
+                    >
+                      <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+                      <path d="M21 3v5h-5" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => fileExplorerRef.current?.openUploadPicker()}
                     disabled={explorerUploadBusy}
                     title={translate("sidebar.uploadFilesTitle")}
@@ -3106,7 +3166,7 @@ export function AppShell() {
                     cwd={activeCwd}
                     onOpenFile={handleOpenFile}
                     selectedFilePath={activeFileTab?.filePath ?? null}
-                    refreshKey={explorerKey}
+                    refreshKey={explorerRefreshKey}
                     onAtMention={(rel, isDir) => {
                       chatInputRef.current?.insertText(buildAtMentionText(rel, isDir));
                     }}

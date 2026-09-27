@@ -1,8 +1,37 @@
 export const TEXT_PREVIEW_MAX_BYTES = 256 * 1024;
 export const IMAGE_PREVIEW_MAX_BYTES = 10 * 1024 * 1024;
-export const DOCX_PREVIEW_MAX_BYTES = 10 * 1024 * 1024;
+export const OFFICE_PREVIEW_MAX_BYTES = 50 * 1024 * 1024;
+export const DOCX_PREVIEW_MAX_BYTES = OFFICE_PREVIEW_MAX_BYTES;
+export const DOC_PREVIEW_MAX_BYTES = OFFICE_PREVIEW_MAX_BYTES;
 
-export type DocumentPreviewKind = "pdf" | "docx";
+export const OFFICE_EXTENSIONS = new Set([
+  "doc", "docx", "dot", "dotx", "rtf",
+  "xls", "xlsx", "xlsm", "xlt", "xltx",
+  "ppt", "pptx", "pot", "potx", "pps", "ppsx",
+  "odt", "ods", "odp",
+]);
+
+export type DocumentPreviewKind =
+  | "pdf"
+  | "docx"
+  | "doc"
+  | "dot"
+  | "dotx"
+  | "rtf"
+  | "xlsx"
+  | "xls"
+  | "xlsm"
+  | "xlt"
+  | "xltx"
+  | "pptx"
+  | "ppt"
+  | "pot"
+  | "potx"
+  | "pps"
+  | "ppsx"
+  | "odt"
+  | "ods"
+  | "odp";
 
 export const IMAGE_EXT_TO_MIME: Record<string, string> = {
   png: "image/png",
@@ -39,6 +68,24 @@ export const VIDEO_EXT_TO_MIME: Record<string, string> = {
 export const DOCUMENT_EXT_TO_MIME: Record<DocumentPreviewKind, string> = {
   pdf: "application/pdf",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  doc: "application/msword",
+  dot: "application/msword",
+  dotx: "application/vnd.openxmlformats-officedocument.wordprocessingml.template",
+  rtf: "application/rtf",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  xls: "application/vnd.ms-excel",
+  xlsm: "application/vnd.ms-excel.sheet.macroEnabled.12",
+  xlt: "application/vnd.ms-excel",
+  xltx: "application/vnd.openxmlformats-officedocument.spreadsheetml.template",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ppt: "application/vnd.ms-powerpoint",
+  pot: "application/vnd.ms-powerpoint",
+  potx: "application/vnd.openxmlformats-officedocument.presentationml.template",
+  pps: "application/vnd.ms-powerpoint",
+  ppsx: "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+  odt: "application/vnd.oasis.opendocument.text",
+  ods: "application/vnd.oasis.opendocument.spreadsheet",
+  odp: "application/vnd.oasis.opendocument.presentation",
 };
 
 function getBaseName(filePath: string): string {
@@ -65,9 +112,15 @@ export function getDocumentMime(filePath: string): string | null {
   return DOCUMENT_EXT_TO_MIME[getFileExt(filePath) as DocumentPreviewKind] ?? null;
 }
 
+export function isOfficePath(filePath: string): boolean {
+  return OFFICE_EXTENSIONS.has(getFileExt(filePath));
+}
+
 export function documentPreviewKind(filePath: string): DocumentPreviewKind | null {
   const ext = getFileExt(filePath);
-  if (ext === "pdf" || ext === "docx") return ext;
+  if (ext === "pdf" || OFFICE_EXTENSIONS.has(ext)) {
+    return ext as DocumentPreviewKind;
+  }
   return null;
 }
 

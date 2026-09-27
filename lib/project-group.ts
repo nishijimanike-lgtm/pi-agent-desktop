@@ -22,7 +22,7 @@ export interface ProjectGroup {
   branches: string[];
 }
 
-function basenameOf(path: string): string {
+export function basenameOf(path: string): string {
   const normalized = path.replace(/\\/g, "/");
   const trimmed = normalized.replace(/\/+$/, "");
   if (!trimmed) return path;
@@ -42,12 +42,20 @@ function basenameOf(path: string): string {
  * the canonical state (live SSE for running, localStorage for unread) and we
  * just project them per-group. Identity is preserved by reference for O(1)
  * `has()` checks downstream.
+ *
+ * `extraProjectRoots` allows caller-known project roots (such as newly added or
+ * currently selected projects) to appear immediately even before any session has
+ * been created in them.
  */
 export function groupByProject(
   sessions: SessionInfo[],
-  options: { runningIds?: Set<string>; unreadIds?: Set<string> } = {},
+  options: {
+    runningIds?: Set<string>;
+    unreadIds?: Set<string>;
+    extraProjectRoots?: Iterable<string>;
+  } = {},
 ): ProjectGroup[] {
-  const { runningIds, unreadIds } = options;
+  const { runningIds, unreadIds, extraProjectRoots } = options;
   const groups = new Map<string, ProjectGroup>();
 
   for (const session of sessions) {
@@ -71,6 +79,21 @@ export function groupByProject(
     }
     if (runningIds?.has(session.id)) group.runningIds.add(session.id);
     if (unreadIds?.has(session.id)) group.unreadIds.add(session.id);
+  }
+
+  if (extraProjectRoots) {
+    for (const root of extraProjectRoots) {
+      if (!root || groups.has(root)) continue;
+      groups.set(root, {
+        projectRoot: root,
+        displayName: basenameOf(root),
+        sessions: [],
+        latestModified: new Date().toISOString(),
+        unreadIds: new Set<string>(),
+        runningIds: new Set<string>(),
+        branches: [],
+      });
+    }
   }
 
   for (const group of groups.values()) {

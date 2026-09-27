@@ -53,6 +53,8 @@
     "@earendil-works/pi-ai": "0.86.1",
     "@earendil-works/pi-coding-agent": "0.86.1",
     "@earendil-works/pi-tui": "0.86.1",
+    "@open-file-viewer/core": "^0.1.48",
+    "@open-file-viewer/react": "^0.1.48",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
     "@tauri-apps/plugin-dialog": "^2.7.2",
@@ -65,13 +67,15 @@
     "js-yaml": "^5.2.3",
     "next": "16.3.5",
     "node-pty": "1.2.0-beta.15",
+    "pdfjs-dist": "^6.3.289",
     "proper-lockfile": "4.1.2",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "remark-frontmatter": "^5.0.0",
     "semver": "7.8.0",
     "undici": "8.10.0",
-    "web-push": "^3.6.7"
+    "web-push": "^3.6.7",
+    "word-extractor": "^1.0.4"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.2",
@@ -84,6 +88,7 @@
     "@types/react-syntax-highlighter": "^15.5.13",
     "@types/semver": "7.8.0",
     "@types/web-push": "^3.6.4",
+    "@types/word-extractor": "^1.0.6",
     "eslint": "^9",
     "eslint-config-next": "16.3.5",
     "jiti": "^2.7.0",

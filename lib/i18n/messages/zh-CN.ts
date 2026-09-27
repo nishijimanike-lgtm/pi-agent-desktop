@@ -217,6 +217,7 @@ export const zhCNLocale: LocalePlugin = {
     "sidebar.new": "新建",
     "sidebar.newSessionTitle": "在 {path} 中新建会话",
     "sidebar.refresh": "刷新",
+    "sidebar.refreshFiles": "刷新文件列表",
     "sidebar.selectProject": "选择项目…",
     "sidebar.filterProjects": "筛选项目…",
     "sidebar.filterFiles": "筛选文件…",

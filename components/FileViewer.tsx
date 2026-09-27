@@ -7,6 +7,8 @@ import {
 } from "react-syntax-highlighter";
 import { SyntaxHighlighter, vs, vscDarkPlus } from "@/lib/syntax-highlighting";
 import ReactMarkdown from "react-markdown";
+import dynamic from "next/dynamic";
+import "@open-file-viewer/core/style.css";
 import { useTheme } from "@/hooks/useTheme";
 import {
   DOCX_PREVIEW_MAX_BYTES,
@@ -14,6 +16,7 @@ import {
   isAudioPath,
   isDocumentPreviewPath,
   isImagePath,
+  isOfficePath,
   isVideoPath,
 } from "@/lib/file-types";
 import { encodeFilePathForApi, getFileDirectory, getFileName, getRelativeFilePath } from "@/lib/file-paths";
@@ -1031,7 +1034,7 @@ function DocumentViewer({ filePath, cwd, sourceSessionId, initialPage, watchEnab
           if (typeof d.size === "number") {
             setSize(d.size);
             if (!isPdf && d.size > DOCX_PREVIEW_MAX_BYTES) {
-              setError("DOCX too large for preview (>10MB)");
+              setError(`${ext.toUpperCase()} too large for preview (>10MB)`);
             }
           }
         })
@@ -1052,7 +1055,7 @@ function DocumentViewer({ filePath, cwd, sourceSessionId, initialPage, watchEnab
         if (typeof d.size === "number") {
           setSize(d.size);
           if (!isPdf && d.size > DOCX_PREVIEW_MAX_BYTES) {
-            setError("DOCX too large for preview (>10MB)");
+            setError(`${ext.toUpperCase()} too large for preview (>10MB)`);
             return;
           }
         }
@@ -1067,10 +1070,10 @@ function DocumentViewer({ filePath, cwd, sourceSessionId, initialPage, watchEnab
       es.close();
       esRef.current = null;
     };
-  }, [filePath, isPdf, sourceSessionId, watchEnabled]);
+  }, [ext, filePath, isPdf, sourceSessionId, watchEnabled]);
 
   const metadata = [
-    ext === "docx" ? "DOCX preview" : "PDF",
+    isPdf ? "PDF" : `${ext.toUpperCase()} preview`,
     size != null ? formatSize(size) : null,
   ].filter(Boolean).join(" · ");
 
@@ -1102,6 +1105,208 @@ function DocumentViewer({ filePath, cwd, sourceSessionId, initialPage, watchEnab
   );
 }
 
+const OpenFileViewer = dynamic(
+  () => import("@open-file-viewer/react").then((mod) => mod.FileViewer),
+  {
+    ssr: false,
+    loading: () => (
+      <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, color: "var(--text-dim)", fontSize: 13 }}>
+        <span className="file-viewer-spinner" aria-hidden="true" />
+        <span>Loading Office viewer…</span>
+      </div>
+    ),
+  }
+);
+
+function OfficeViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Props) {
+  const { isDark } = useTheme();
+  const { t } = useI18n();
+  const [data, setData] = useState<ArrayBuffer | null>(null);
+  const [size, setSize] = useState<number | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [watching, setWatching] = useState(false);
+  const [bust, setBust] = useState(0);
+  const [fallbackMode, setFallbackMode] = useState(false);
+
+  const esRef = useRef<EventSource | null>(null);
+  const ext = getFileExt(filePath);
+  const fileName = getFileName(filePath);
+  const [plugins, setPlugins] = useState<unknown[] | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    import("@open-file-viewer/core")
+      .then((mod) => {
+        if (active) {
+          setPlugins([mod.officePlugin()]);
+        }
+      })
+      .catch((err) => {
+        console.warn("Failed to load officePlugin:", err);
+        if (active) {
+          setFallbackMode(true);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError(null);
+
+    const readUrl = getFileApiUrl(filePath, "read", sourceSessionId, bust ? { v: bust } : undefined);
+    fetch(readUrl)
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Failed to load file: ${response.status} ${response.statusText}`);
+        }
+        return response.arrayBuffer();
+      })
+      .then((ab) => {
+        if (!active) return;
+        setData(ab);
+        setSize(ab.byteLength);
+        setLoading(false);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : String(err));
+        setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [filePath, sourceSessionId, bust]);
+
+  useEffect(() => {
+    if (!watchEnabled) return;
+
+    if (esRef.current) {
+      esRef.current.close();
+      esRef.current = null;
+    }
+
+    const es = new EventSource(getFileApiUrl(filePath, "watch", sourceSessionId));
+    esRef.current = es;
+
+    es.addEventListener("connected", () => {
+      setWatching(true);
+    });
+    es.addEventListener("change", () => {
+      setBust((b) => b + 1);
+    });
+    es.addEventListener("error", () => {
+      setWatching(false);
+    });
+    es.onerror = () => {
+      setWatching(false);
+    };
+
+    return () => {
+      es.close();
+      esRef.current = null;
+    };
+  }, [filePath, sourceSessionId, watchEnabled]);
+
+  const previewHtmlUrl = getFileApiUrl(filePath, "preview", sourceSessionId, bust ? { v: bust } : undefined);
+
+  const metadata = [
+    `${ext.toUpperCase()} preview`,
+    size != null ? formatSize(size) : null,
+  ].filter(Boolean).join(" · ");
+
+  return (
+    <div className="file-viewer-shell">
+      <FileViewerToolbar
+        filePath={filePath}
+        cwd={cwd}
+        metadata={metadata}
+        watching={watching}
+        sourceSessionId={sourceSessionId}
+      >
+        <button
+          type="button"
+          onClick={() => setFallbackMode((prev) => !prev)}
+          title={fallbackMode ? "Switch to interactive Office viewer" : "Switch to HTML document view"}
+          style={{
+            fontSize: 11,
+            padding: "2px 8px",
+            borderRadius: 5,
+            border: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+            color: "var(--text-dim)",
+            cursor: "pointer",
+          }}
+        >
+          {fallbackMode ? "Interactive View" : "HTML View"}
+        </button>
+      </FileViewerToolbar>
+
+      <div className="file-viewer-document-stage" style={{ height: "calc(100% - 40px)", overflow: "hidden" }}>
+        {loading || (!fallbackMode && !plugins && !error) ? (
+          <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, color: "var(--text-dim)", fontSize: 13 }}>
+            <span className="file-viewer-spinner" aria-hidden="true" />
+            <span>Loading {ext.toUpperCase()} document…</span>
+          </div>
+        ) : error ? (
+          <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, padding: 24, color: "var(--danger)", fontSize: 13, textAlign: "center" }}>
+            <p>{error}</p>
+            <button
+              type="button"
+              onClick={() => setBust((b) => b + 1)}
+              style={{
+                padding: "4px 12px",
+                borderRadius: 6,
+                border: "1px solid var(--border)",
+                background: "var(--bg-panel)",
+                cursor: "pointer",
+              }}
+            >
+              Retry
+            </button>
+          </div>
+        ) : fallbackMode ? (
+          <iframe
+            key={previewHtmlUrl}
+            src={previewHtmlUrl}
+            sandbox="allow-same-origin"
+            title={t("i18n.previewFile", { file: fileName })}
+            style={{
+              width: "100%",
+              height: "100%",
+              border: "none",
+              background: isDark ? "var(--bg)" : "#eef1f5",
+            }}
+          />
+        ) : data && plugins ? (
+          <div style={{ width: "100%", height: "100%", overflow: "hidden" }}>
+            <OpenFileViewer
+              file={data}
+              fileName={fileName}
+              width="100%"
+              height="100%"
+              fit="contain"
+              toolbar={true}
+              theme={isDark ? "dark" : "light"}
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              plugins={plugins as any}
+              onError={(err) => {
+                console.warn("open-file-viewer render error, switching to HTML fallback:", err);
+                setFallbackMode(true);
+              }}
+            />
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 export function FileViewer({
   filePath,
   cwd,
@@ -1124,6 +1329,9 @@ export function FileViewer({
   }
   if (isVideoPath(filePath)) {
     return <VideoViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} watchEnabled={watchEnabled} />;
+  }
+  if (isOfficePath(filePath)) {
+    return <OfficeViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} watchEnabled={watchEnabled} />;
   }
   if (isDocumentPreviewPath(filePath)) {
     return <DocumentViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} initialPage={initialPage} watchEnabled={watchEnabled} />;

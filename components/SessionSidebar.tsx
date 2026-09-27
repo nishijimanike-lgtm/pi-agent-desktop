@@ -272,6 +272,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       ? new Set(stored.filter((root): root is string => typeof root === "string"))
       : new Set();
   });
+  const [customProjectRoots, setCustomProjectRoots] = useState<Set<string>>(() => {
+    const stored = getPrefJson<unknown>(APP_PREF_KEYS.customProjects);
+    return Array.isArray(stored)
+      ? new Set(stored.filter((root): root is string => typeof root === "string"))
+      : new Set();
+  });
   const [projectMenu, setProjectMenu] = useState<{ root: string } | null>(null);
   const [projectMenuPos, setProjectMenuPos] = useState<{ top: number; left: number } | null>(null);
   const [projectBranchMenu, setProjectBranchMenu] = useState<ProjectBranchMenuState | null>(null);
@@ -378,6 +384,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   useEffect(() => {
     setPrefJson(APP_PREF_KEYS.archivedProjects, [...archivedProjectRoots]);
   }, [archivedProjectRoots]);
+
+  useEffect(() => {
+    setPrefJson(APP_PREF_KEYS.customProjects, [...customProjectRoots]);
+  }, [customProjectRoots]);
 
   const onModelsVersionChangeRef = useRef(onModelsVersionChange);
   useEffect(() => {
@@ -582,8 +592,15 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       next.delete(projectRoot);
       return next;
     });
+    setCustomProjectRoots((previous) => {
+      if (previous.has(projectRoot)) return previous;
+      const next = new Set(previous);
+      next.add(projectRoot);
+      return next;
+    });
     setSelectedCwd(cwd);
-  }, [projectRootFor]);
+    void loadSessions(false);
+  }, [projectRootFor, loadSessions]);
 
   // Notify parent only when the effective cwd actually changes (not when
   // projectRootFor identity changes due to session/worktree refreshes).
@@ -1006,6 +1023,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       next.add(projectRoot);
       return next;
     });
+    setCustomProjectRoots((prev) => {
+      if (!prev.has(projectRoot)) return prev;
+      const next = new Set(prev);
+      next.delete(projectRoot);
+      return next;
+    });
     setProjectMenu(null);
     setProjectMenuPos(null);
   }, []);
@@ -1038,8 +1061,26 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         || session.firstMessage.toLowerCase().includes(trimmedSessionQuery))
     : allSessions;
   const sessionFamilies = listSessionFamilies(filteredSessions);
-  const allProjects = groupByProject(filteredSessions, { runningIds: runningSessionIds, unreadIds: unreadSessionIds });
-  const activeProjects = allProjects.filter((group) => !archivedProjectRoots.has(group.projectRoot));
+  const candidateRoots = useMemo(() => {
+    const roots = new Set<string>(customProjectRoots);
+    if (selectedCwd) {
+      const activeRoot = projectRootFor(selectedCwd) ?? selectedCwd;
+      roots.add(activeRoot);
+    }
+    return roots;
+  }, [customProjectRoots, selectedCwd, projectRootFor]);
+  const allProjects = groupByProject(filteredSessions, {
+    runningIds: runningSessionIds,
+    unreadIds: unreadSessionIds,
+    extraProjectRoots: candidateRoots,
+  });
+  const activeProjects = allProjects.filter((group) => {
+    if (archivedProjectRoots.has(group.projectRoot)) return false;
+    if (trimmedSessionQuery && group.sessions.length === 0) {
+      return group.displayName.toLowerCase().includes(trimmedSessionQuery);
+    }
+    return true;
+  });
   useEffect(() => {
     const projectRoots = activeProjects.map((group) => group.projectRoot);
     onProjectsChange?.(projectRoots);
@@ -1186,7 +1227,20 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         </div>
         {!isCollapsed && (
           <div className="sidebar-project-tree-children">
-            {visibleGroupTree.map((node) => {
+            {visibleGroupTree.length === 0 ? (
+              <div
+                className="sidebar-project-empty-hint"
+                style={{
+                  padding: "6px 12px 6px 32px",
+                  fontSize: 11,
+                  color: "var(--text-dim)",
+                  userSelect: "none",
+                }}
+              >
+                {t("sidebar.noSessions")}
+              </div>
+            ) : (
+              visibleGroupTree.map((node) => {
               const nodeFamily = sessionFamilies.find(
                 (family) => family.root.id === node.session.id,
               );
@@ -1206,7 +1260,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 }}
               />
               );
-            })}
+            }))}
             {showSessionOverflow && (
               <button
                 type="button"

@@ -61,6 +61,26 @@ const nextConfig: NextConfig = {
     "172.31.*.*",
     "192.168.*.*",
   ],
+  webpack(config) {
+    config.resolve = config.resolve || {};
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      "@napi-rs/canvas": false,
+      canvas: false,
+    };
+    config.resolve.fallback = {
+      ...config.resolve.fallback,
+      "@napi-rs/canvas": false,
+      canvas: false,
+    };
+    config.module = config.module || {};
+    config.module.rules = config.module.rules || [];
+    config.module.rules.push({
+      test: /\.node$/,
+      loader: "next/dist/build/webpack/loaders/empty-loader",
+    });
+    return config;
+  },
   async headers() {
     return [
       {
