@@ -216,6 +216,13 @@ export function AppShell() {
   }, []);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
+  const appliedModelsVersionRef = useRef<number | null>(null);
+  const handleModelsVersionChange = useCallback((version: number) => {
+    if (appliedModelsVersionRef.current !== null && version !== appliedModelsVersionRef.current) {
+      setModelsRefreshKey((key) => key + 1);
+    }
+    appliedModelsVersionRef.current = version;
+  }, []);
   const [topMoreOpen, setTopMoreOpen] = useState(false);
   const topMoreRef = useRef<HTMLDivElement>(null);
   const [projectTrust, setProjectTrust] = useState<ProjectTrustStatus | null>(null);
@@ -1543,6 +1550,7 @@ export function AppShell() {
         onBackgroundTaskDone={handleBackgroundTaskDone}
         onRunningSessionIdsChange={handleRunningSessionIdsChange}
         onSessionsChange={handleSessionsChange}
+        onModelsVersionChange={handleModelsVersionChange}
       />
       <div className="sidebar-footer" style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
         {([

@@ -47,6 +47,7 @@ interface Props {
   onRunningSessionIdsChange?: (ids: Set<string>) => void;
   onSessionsChange?: (sessions: SessionInfo[]) => void;
   onProjectsChange?: (projectRoots: string[]) => void;
+  onModelsVersionChange?: (version: number) => void;
   headerControls?: ReactNode;
 }
 
@@ -197,7 +198,7 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
   return roots;
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onProjectsChange, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange, headerControls, onOpenTerminal }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onProjectsChange, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange, onModelsVersionChange, headerControls, onOpenTerminal }: Props) {
   const { t, locale } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [sessionListVersion, setSessionListVersion] = useState<number | null>(null);
@@ -391,7 +392,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       source = new EventSource("/api/agent/running/events");
       source.onmessage = async (e) => {
         try {
-          const data = JSON.parse(e.data) as { type?: string; runningSessionIds?: string[]; sessionListVersion?: number };
+          const data = JSON.parse(e.data) as {
+            type?: string;
+            runningSessionIds?: string[];
+            sessionListVersion?: number;
+            modelsVersion?: number;
+          };
           if (data.type === "running") {
             sseAuthoritativeRef.current = true;
             setRunningSessionIds(new Set(data.runningSessionIds ?? []));
@@ -401,6 +407,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             // Another window/process changed the list; reuse the invalidated
             // server cache instead of forcing a fresh scan.
             await loadSessions();
+          }
+          if (typeof data.modelsVersion === "number") {
+            onModelsVersionChange?.(data.modelsVersion);
           }
         } catch {
           // ignore malformed frames

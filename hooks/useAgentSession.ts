@@ -2004,6 +2004,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setModelThinkingLevelMaps(d.thinkingLevelMaps ?? {});
     const nextModelList = d.modelList ?? [];
     setModelList(nextModelList);
+    if (newSessionModelOverrideRef.current) {
+      const exists = nextModelList.some(
+        (m) => m.provider === newSessionModelOverrideRef.current?.provider && m.id === newSessionModelOverrideRef.current?.modelId,
+      );
+      if (!exists && nextModelList.length > 0) {
+        newSessionModelOverrideRef.current = null;
+        setNewSessionModel(null);
+      }
+    }
     const displayDefaultModel = d.defaultModel
       ? nextModelList.find((m) => m.id === d.defaultModel?.modelId && m.provider === d.defaultModel?.provider)
       : undefined;
@@ -2023,7 +2032,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         );
       }
     }
-  }, [isNew, newSessionCwd, session?.cwd]);
+  }, [isNew, newSessionCwd, session?.cwd, setNewSessionModel]);
 
   const handleBuiltinSlashCommand = useCallback(async (text: string): Promise<BuiltinSlashCommandResult> => {
     if (!text.startsWith("/")) return { handled: false };
