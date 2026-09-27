@@ -4,6 +4,7 @@ import { promisify } from "util";
 import fs from "fs";
 import path from "path";
 import {
+  ensureCwdAllowed,
   getAllowedFileRoots,
   isExistingFilePathAllowed,
   isFilePathAllowed,
@@ -128,6 +129,7 @@ export async function GET(req: NextRequest) {
       ? Math.min(Math.max(parsedLimit, 1), MAX_MATCH_LIMIT)
       : DEFAULT_MATCH_LIMIT;
 
+    ensureCwdAllowed(cwd);
     const allowedRoots = await getAllowedFileRoots();
     if (!isFilePathAllowed(cwd, allowedRoots)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });

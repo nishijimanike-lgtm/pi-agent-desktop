@@ -599,6 +599,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       return next;
     });
     setSelectedCwd(cwd);
+    void fetch("/api/cwd/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd }),
+    }).catch(() => undefined);
     void loadSessions(false);
   }, [projectRootFor, loadSessions]);
 

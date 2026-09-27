@@ -1,11 +1,25 @@
-import { readdirSync } from "fs";
+import { readdirSync, statSync } from "fs";
 import { userHome } from "./user-home.ts";
 import path from "path";
-import { getAdditionalAllowedRoots, normalizeSlashes } from "./allowed-roots";
+import { allowFileRoot, getAdditionalAllowedRoots, normalizeSlashes } from "./allowed-roots";
 import { isExistingPathWithinRoots, isPathWithinRoots } from "./path-security";
 import { listAllSessions } from "./session-reader";
 export { allowFileRoot, normalizeSlashes } from "./allowed-roots";
 export { isWindowsAbsolutePath } from "./paths";
+
+/** Auto-allows a target path if it exists on disk and is a directory. */
+export function ensureCwdAllowed(target?: string | null): void {
+  if (!target) return;
+  try {
+    const normalized = normalizeSlashes(target);
+    const st = statSync(normalized);
+    if (st.isDirectory()) {
+      allowFileRoot(normalized);
+    }
+  } catch {
+    // Ignore non-existent directories or invalid paths
+  }
+}
 
 // Short-TTL cache for the allowed-roots set. Without this, every file list/read
 // request re-scans every pi session on disk just to check access. 5s is short
@@ -62,6 +76,7 @@ export function isExistingFilePathAllowed(target: string, allowedRoots: Set<stri
 /** Whether `target` is a session cwd / project root / explicitly allowed dir
  *  that currently exists — the gate shared by /api/files and /api/worktrees. */
 export async function isCwdAllowed(target: string): Promise<boolean> {
+  ensureCwdAllowed(target);
   const allowedRoots = await getAllowedFileRoots();
   return isFilePathAllowed(target, allowedRoots) && isExistingFilePathAllowed(target, allowedRoots);
 }

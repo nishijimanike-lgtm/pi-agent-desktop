@@ -4,6 +4,7 @@ import { readTextPreviewChunk } from "@/lib/text-preview";
 import fs from "fs";
 import path from "path";
 import {
+  ensureCwdAllowed,
   getAllowedFileRoots,
   isExistingFilePathAllowed,
   isFilePathAllowed,
@@ -721,6 +722,10 @@ export async function GET(
       return NextResponse.json({ error: "Invalid file request type" }, { status: 400 });
     }
     const sessionId = request.nextUrl.searchParams.get("sessionId");
+
+    const cwdParam = request.nextUrl.searchParams.get("cwd");
+    ensureCwdAllowed(cwdParam);
+    ensureCwdAllowed(filePath);
 
     const allowedRoots = await getAllowedFileRoots();
     const allowedByRoot = isFilePathAllowed(filePath, allowedRoots);
