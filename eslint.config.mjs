@@ -9,6 +9,7 @@ const eslintConfig = [
       ".next-desktop/**",
       "src-tauri/resources/server/**",
       "src-tauri/target/**",
+      "demo/**",
     ],
   },
   ...coreWebVitals,

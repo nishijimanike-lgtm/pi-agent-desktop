@@ -7,10 +7,11 @@ export const filePanelFixture = `<!doctype html><html><body style="margin:20px;m
 <script>window.previewInstance = Math.random();</script></body></html>`;
 
 export async function checkFilePanel(page, filePath) {
-  const hideSidebar = page.getByRole("button", { name: "Hide sidebar", exact: true });
-  if (await page.locator("#session-sidebar").evaluate((element) => element.classList.contains("sidebar-open"))) {
-    await hideSidebar.click();
-  }
+  const showSidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
+  if (await showSidebar.isVisible()) await showSidebar.click();
+  // The DOM title normalizes Windows paths to forward slashes
+  // (lib/file-paths.ts normalizeFilePathSlashes), so match in that form.
+  await page.getByTitle(filePath.replace(/\\/g, "/"), { exact: true }).click();
   const panel = page.locator("#file-panel");
   const showPanel = page.viewportSize().width <= 640
     ? page.locator('.right-panel-toggle-button[aria-label="Show file panel"]')
