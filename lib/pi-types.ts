@@ -158,10 +158,13 @@ export interface AgentSessionLike {
       messages: PiAgentMessage[],
       signal?: AbortSignal,
     ) => Promise<PiAgentMessage[]>;
-    prepareNextTurnWithContext?: (
-      context: unknown,
-      signal?: AbortSignal,
-    ) => Promise<unknown> | unknown;
+    /**
+     * pi ≥ 0.87 types this parameter concretely (PrepareNextTurnContext), which
+     * makes a `context: unknown` property signature reject the real
+     * AgentSession under strictFunctionTypes. Method syntax stays bivariant, so
+     * the loose structural contract survives SDK signature changes.
+     */
+    prepareNextTurnWithContext?(context: unknown, signal?: AbortSignal): Promise<unknown> | unknown;
   };
   readonly extensionRunner: ExtensionRunnerLike;
   readonly promptTemplates: readonly PromptTemplateLike[];

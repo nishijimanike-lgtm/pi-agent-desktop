@@ -94,6 +94,14 @@ interface ValidatedProject {
 const UNREAD_SESSIONS_STORAGE_KEY = "pi-web:unread-session-ids";
 const LAST_CUSTOM_CWD_STORAGE_KEY = "pi-web:last-custom-cwd";
 const RUNNING_SESSIONS_POLL_MS = 2500;
+const SESSION_DETAILS_HYDRATION_DELAY_MS = 750;
+
+/** `summary=1` paints from header metadata; `force=1` re-reads past the server's list cache. */
+function sessionListUrl(summary: boolean, force: boolean): string {
+  if (summary) return "/api/sessions?summary=1";
+  if (force) return "/api/sessions?force=1";
+  return "/api/sessions";
+}
 
 function loadLastCustomCwd(): string {
   if (typeof window === "undefined") return "";
@@ -290,6 +298,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   const previousSuppressedCompletionSessionIdsRef = useRef<Set<string>>(new Set());
+  // Summary metadata paints the list first; exact counts, names, and first
+  // messages are hydrated once the selected chat has had a chance to load.
+  const detailsHydrationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Once polling has delivered a snapshot it is the source of truth for
   // running state; late /api/sessions responses must not overwrite it.
   const sseAuthoritativeRef = useRef(false);

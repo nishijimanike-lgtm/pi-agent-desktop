@@ -1,0 +1,11 @@
+
+> @agegr/pi-web@0.10.0 desktop:prepare
+> node scripts/prepare-desktop.mjs
+
+▲ Next.js 16.3.6 (webpack)
+✓ Running next.config.ts took 2.2s
+- Experiments (use with caution):
+  · optimizePackageImports
+  · proxyClientMaxBodySize: "128mb"
+
+  Creating an optimized production build ...
