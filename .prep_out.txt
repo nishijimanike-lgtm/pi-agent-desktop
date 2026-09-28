@@ -9,3 +9,6 @@
   · proxyClientMaxBodySize: "128mb"
 
   Creating an optimized production build ...
+socket hang up
+
+Retrying 1/3...
