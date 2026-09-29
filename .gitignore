@@ -47,6 +47,7 @@ next-env.d.ts
 
 # local agent tooling state
 /.claude/
+/.kilo/
 /.spec-workflow/
 
 # generated macOS desktop bundle inputs and Rust build output
