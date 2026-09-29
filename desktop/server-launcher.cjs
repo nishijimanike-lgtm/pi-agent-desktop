@@ -12,7 +12,11 @@ const parentWatchdog = setInterval(() => {
 
   try {
     process.kill(expectedParentPid, 0);
-  } catch {
+  } catch (err) {
+    // EPERM means the process exists but signaling permission was denied (common on Windows).
+    if (err && err.code === "EPERM") {
+      return;
+    }
     process.exit(0);
   }
 }, 1_000);
