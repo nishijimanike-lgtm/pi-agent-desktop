@@ -6,7 +6,7 @@ import { relaunchAppNative } from "@/lib/desktop-native";
 
 export type DesktopConnectionState = "online" | "offline" | "checking";
 
-const PING_INTERVAL_MS = 8_000;
+const PING_INTERVAL_MS = 15_000;
 const OFFLINE_THRESHOLD = 2;
 
 /**
@@ -32,7 +32,7 @@ export function useDesktopConnection(enabled = true): {
     probeControllerRef.current?.abort();
     const controller = new AbortController();
     probeControllerRef.current = controller;
-    const timeout = window.setTimeout(() => controller.abort(), 4_000);
+    const timeout = window.setTimeout(() => controller.abort(), 15_000);
     try {
       const res = await fetch(`/api/home?_=${Date.now()}`, {
         method: "GET",

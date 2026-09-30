@@ -13,7 +13,7 @@
  */
 
 /** Generous enough for a cold packaged server; short enough to not feel stuck. */
-export const DEFAULT_FETCH_TIMEOUT_MS = 6_000;
+export const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 
 export async function fetchWithDeadline(
   url: string,
@@ -43,7 +43,7 @@ export async function fetchWithDeadline(
  * work continues server-side after the client gives up — so the retry usually
  * lands on an already-warm server, but deserves room if it does not.
  */
-export const DEFAULT_FETCH_RETRY_TIMEOUT_MS = 10_000;
+export const DEFAULT_FETCH_RETRY_TIMEOUT_MS = 60_000;
 
 /**
  * One deadline-bounded retry. `shouldRetry` lets the caller drop a retry that
