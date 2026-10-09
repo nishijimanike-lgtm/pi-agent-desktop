@@ -29,10 +29,11 @@ async function runNextBuild() {
   delete buildEnv.__NEXT_PRIVATE_ORIGIN;
 
   await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [nextBin, "build", "--webpack"], {
+    const child = spawn(process.execPath, ["--max-old-space-size=20480", nextBin, "build", "--webpack"], {
       cwd: rootDir,
       env: {
         ...buildEnv,
+        NODE_OPTIONS: `${buildEnv.NODE_OPTIONS ?? ""} --max-old-space-size=20480`.trim(),
         NEXT_TELEMETRY_DISABLED: "1",
         PI_WEB_DESKTOP_BUILD: "1",
       },
