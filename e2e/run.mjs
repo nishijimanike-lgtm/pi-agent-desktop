@@ -9,9 +9,11 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
-import { checkFilePanel, filePanelFixture } from "./file-panel.mjs";
+import { checkFilePanel, filePanelFixture, filePanelStylesheet } from "./file-panel.mjs";
 import { checkExtensionDialogs, extensionSource } from "./extension-dialog.mjs";
 import { checkChatAppearance } from "./chat-appearance.mjs";
+import { checkMcpManager } from "./mcp-manager.mjs";
+import { checkMissingWorkspace, MISSING_WORKSPACE, missingWorkspaceReply } from "./missing-workspace.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const mode = process.env.E2E_SERVER_MODE || "dev";
@@ -25,6 +27,7 @@ const sessionDir = join(agentDir, "sessions", "e2e");
 mkdirSync(project);
 const previewFile = join(project, "preview.html");
 writeFileSync(previewFile, filePanelFixture);
+writeFileSync(join(project, "preview.css"), filePanelStylesheet);
 mkdirSync(sessionDir, { recursive: true });
 const timestamp = "2026-08-23T00:00:00.000Z";
 const LONG = "e2e-long-session";
@@ -39,8 +42,11 @@ function message(id, parentId, role, content) {
   return { type: "message", id, parentId, timestamp, message: { role, content } };
 }
 
-function writeSession(id, entries) {
-  const header = { type: "session", version: 3, id, timestamp, cwd: project };
+const missingProject = join(agentDir, "missing-project");
+mkdirSync(missingProject);
+
+function writeSession(id, entries, cwd = project) {
+  const header = { type: "session", version: 3, id, timestamp, cwd };
   writeFileSync(join(sessionDir, `2026-08-23T00-00-00-000Z_${id}.jsonl`),
     [header, ...entries].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
 }
@@ -125,6 +131,10 @@ try {
     message("root", null, "user", "E2E wrapper root"),
     message("reply", "root", "assistant", "E2E wrapper reply"),
   ]);
+  writeSession(MISSING_WORKSPACE, [
+    message("root", null, "user", "E2E missing workspace prompt"),
+    message("reply", "root", "assistant", missingWorkspaceReply),
+  ], missingProject);
 
   const probe = createServer();
   probe.listen(0, "127.0.0.1");
@@ -166,7 +176,7 @@ try {
     const response = await fetch(`${base}/api/sessions`, { signal: AbortSignal.timeout(5000) }).catch(() => null);
     if (response?.ok) {
       const { sessions } = await response.json();
-      assert.deepEqual(sessions.map((session) => session.id).sort(), [LONG, BRANCH, RICH, COMPACTED, APPEND].sort());
+      assert.deepEqual(sessions.map((session) => session.id).sort(), [LONG, BRANCH, RICH, COMPACTED, APPEND, MISSING_WORKSPACE].sort());
       break;
     }
     assert.ok(Date.now() < deadline, "Server readiness timed out; see server.log");
@@ -227,7 +237,16 @@ try {
     const errors = [];
     const olderResponses = [];
     page.on("pageerror", (error) => errors.push(error.message));
-    page.on("console", (event) => { if (event.type() === "error") errors.push(event.text()); });
+    page.on("console", (event) => {
+      if (event.type() !== "error") return;
+      const message = event.text();
+      // Both by design: the static HTML preview's sandbox blocks the fixture's
+      // inline script, and the opt-in scripted (srcDoc) preview cannot resolve
+      // the fixture's relative stylesheet.
+      if (/^Blocked script execution in '[^']*\/preview\.html\?type=serve[&']/.test(message)) return;
+      if (message.startsWith("Failed to load resource") && event.location().url === `${base}/preview.css`) return;
+      errors.push(message);
+    });
     page.on("response", (response) => {
       if (response.url().startsWith(base) && response.status() >= 500) errors.push(`${response.status()} ${response.url()}`);
       const url = new URL(response.url());
@@ -346,20 +365,27 @@ try {
         await page.locator(`[data-entry-id="${entryId}"]:not([data-message-role])`).waitFor({ state: "visible" });
       };
       const readingOffset = (target) => target.evaluate((element) => (
-        element.getBoundingClientRect().top - element.closest(".overflow-y-auto").getBoundingClientRect().top
+        element.getBoundingClientRect().top - element.closest(".chat-scroll-container").getBoundingClientRect().top
       ));
       const positionForReading = async (target) => {
         await target.evaluate((element) => {
-          const scroll = element.closest(".overflow-y-auto");
+          const scroll = element.closest(".chat-scroll-container");
           scroll.scrollTop += element.getBoundingClientRect().top - scroll.getBoundingClientRect().top - 120;
         });
         return readingOffset(target);
       };
       await selectSession(text(0), "e4999");
-      const olderPage = page.waitForResponse((response) => response.url().includes(`/api/sessions/${LONG}/context?`));
-      await page.getByText("Scroll up to load earlier messages", { exact: true }).evaluate((element) => element.scrollIntoView({ block: "start", behavior: "instant" }));
-      await olderPage;
-      await page.locator("[data-entry-id='e4850']").waitFor({ state: "attached" });
+      // A prepended page keeps the reader anchored, which scrolls the sentinel
+      // back out of view; reaching e4850 takes one scroll per page. Whether a
+      // second page also chains in on its own is timing-dependent, so loop.
+      const pagedMessage = page.locator("[data-entry-id='e4850']");
+      for (let turn = 0; turn < 4 && await pagedMessage.count() === 0; turn++) {
+        const olderPage = page.waitForResponse((response) => response.url().includes(`/api/sessions/${LONG}/context?`));
+        await page.getByText("Scroll up to load earlier messages", { exact: true }).evaluate((element) => element.scrollIntoView({ block: "start", behavior: "instant" }));
+        await olderPage;
+        await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      }
+      await pagedMessage.waitFor({ state: "attached" });
       const olderMessage = page.locator("[data-entry-id='e4920']");
       await olderMessage.waitFor({ state: "visible" });
       await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -372,13 +398,13 @@ try {
       await selectSession(text(0), "e4920");
       await page.waitForFunction(({ entryId, expected }) => {
         const element = document.querySelector(`[data-entry-id="${entryId}"]:not([data-message-role])`);
-        const scroll = element?.closest(".overflow-y-auto");
+        const scroll = element?.closest(".chat-scroll-container");
         if (!element || !scroll) return false;
         return Math.abs(element.getBoundingClientRect().top - scroll.getBoundingClientRect().top - expected) < 5;
       }, { entryId: "e4920", expected: olderOffset }, { timeout: 10000 }).catch(async (error) => {
         const details = await page.evaluate(() => {
           const element = document.querySelector('[data-entry-id="e4920"]:not([data-message-role])');
-          const scroll = element?.closest(".overflow-y-auto");
+          const scroll = element?.closest(".chat-scroll-container");
           return {
             present: Boolean(element),
             scrollTop: scroll?.scrollTop,
@@ -396,7 +422,7 @@ try {
       assert.equal(await process.getAttribute("aria-expanded"), "false");
       await page.waitForFunction((expected) => {
         const element = Array.from(document.querySelectorAll("h2")).find((heading) => heading.textContent === "E2E reading position");
-        const scroll = element?.closest(".overflow-y-auto");
+        const scroll = element?.closest(".chat-scroll-container");
         if (!element || !scroll) return false;
         return Math.abs(element.getBoundingClientRect().top - scroll.getBoundingClientRect().top - expected) < 5;
       }, answerOffset);
@@ -438,6 +464,7 @@ try {
       await page.goto(`${base}/?session=${RICH}`, { waitUntil: "domcontentloaded" });
       await page.locator(".markdown-code-block pre").waitFor();
       await checkChatAppearance(page);
+      await checkMcpManager(page, { agentDir, cwd: project });
     }
     assert.deepEqual(errors, [], `Browser errors at width ${viewport.width}`);
     console.log(`PASS: ${viewport.width}px browser pagination, branch, markdown, code, tool call, and conversation navigation`);
@@ -446,6 +473,7 @@ try {
     context = undefined;
     page = undefined;
   }
+  await checkMissingWorkspace(browser, base, missingProject);
 } catch (error) {
   console.error(error);
   process.exitCode = 1;

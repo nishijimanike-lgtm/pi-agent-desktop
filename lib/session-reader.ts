@@ -3,7 +3,6 @@ import {
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
 import { closeSync, type Dirent, fstatSync, openSync, readSync, statSync } from "fs";
-import { scanAllSessions } from "./session-scan";
 import { readdir } from "fs/promises";
 import { isAbsolute, join, normalize as normalizePath, relative, resolve as resolvePath, sep } from "path";
 import type { AgentMessage, ImageContent, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
@@ -12,12 +11,12 @@ import { getThinkingPreview } from "./message-display";
 import { projectIdentityKey } from "./project-identity";
 import { sessionPathKey } from "./session-path";
 import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "./tool-result-images";
+import { projectToolResultDetails, slimToolResultMessage } from "./tool-result-details";
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
 import { listSessionsIncremental, type ScannedSessionInfo } from "./session-list-scanner";
 
 export { getAgentDir };
-export { invalidateScannedSession } from "./session-scan";
 
 const SESSION_HEADER_MAX_BYTES = 64 * 1024;
 const SESSION_RELATION_MAX_BYTES = 256 * 1024;
@@ -118,7 +117,7 @@ function readEntryId(line: string): string | undefined {
 /**
  * Newest entry id recorded on disk, read from a bounded tail so large sessions
  * stay cheap. Undefined when the file is absent (a wrapper that has not flushed
- * its first assistant turn yet) or unreadable.
+ * its first message yet) or unreadable.
  *
  * Used only on ?force=1 session reads (mount / page refresh). An id the
  * in-memory wrapper never saw means another pi process appended to the file.
@@ -220,6 +219,7 @@ function mapScannedSession(
     created: scanned.created.toISOString(),
     modified: scanned.modified.toISOString(),
     messageCount: scanned.messageCount,
+    ...(scanned.compactionCount ? { compactionCount: scanned.compactionCount } : {}),
     // A pending row has no first message yet; the placeholder would read as a
     // real "(no messages)" session until the details arrive.
     firstMessage: detailsPending && !scanned.firstMessage
@@ -497,6 +497,37 @@ function evictSmCache(cache: Map<string, SmCacheEntry>): void {
   }
 }
 
+/**
+ * Project every tool result's details in place (see lib/tool-result-details.ts).
+ * Mutating is safe only because the manager is a cached read-only view whose
+ * entries are never written back. Returns whether anything was dropped.
+ */
+function slimCachedEntries(sm: SessionManager): boolean {
+  let slimmed = false;
+  for (const entry of sm.getEntries()) {
+    if (entry.type !== "message") continue;
+    const message = entry.message as unknown as { role?: unknown; details?: unknown };
+    if (message.role !== "toolResult" || message.details === undefined) continue;
+    const projected = projectToolResultDetails(message.details);
+    if (projected === message.details) continue;
+    if (projected === undefined) delete message.details;
+    else message.details = projected;
+    slimmed = true;
+  }
+  return slimmed;
+}
+
+/** Retained size after slimming: the file size is no longer a fair proxy. */
+function estimateRetainedBytes(sm: SessionManager, fileBytes: number): number {
+  try {
+    let bytes = 0;
+    for (const entry of sm.getEntries()) bytes += JSON.stringify(entry).length;
+    return Math.min(bytes, fileBytes);
+  } catch {
+    return fileBytes;
+  }
+}
+
 export function invalidateSessionManagerCache(filePath?: string): void {
   const cache = getSmCache();
   if (filePath === undefined) {
@@ -534,12 +565,18 @@ export function openSessionManager(
   }
 
   const sm = SessionManager.open(filePath, undefined);
-  if (stats.bytes > SM_CACHE_LIMITS.maxFileBytes) {
+  // Cached managers are read-only views, and nothing reads a cached entry's
+  // tool-result details beyond what the UI renders, so drop the rest before
+  // the entry is retained. Extension payloads (browser DOM outlines) can be
+  // 97% of a file; without this a 140MB session was never cacheable and paid
+  // a full re-parse on every open.
+  const bytes = slimCachedEntries(sm) ? estimateRetainedBytes(sm, stats.bytes) : stats.bytes;
+  if (bytes > SM_CACHE_LIMITS.maxFileBytes) {
     // Too large to hold: drop any stale entry for this path and serve fresh.
     cache.delete(pathKey);
     return sm;
   }
-  cache.set(pathKey, { sm, fingerprint: stats.fingerprint, bytes: stats.bytes });
+  cache.set(pathKey, { sm, fingerprint: stats.fingerprint, bytes });
   evictSmCache(cache);
   return sm;
 }
@@ -633,28 +670,36 @@ export function getLatestModelChange(entries: SessionEntry[]): SessionContext["m
   return null;
 }
 
+/** Model from the newest assistant response metadata — the fallback the
+ *  pre-wrapper UI displays when a session has no model_change entries. */
+export function getLatestResponseModel(entries: SessionEntry[]): SessionContext["model"] {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.type === "message" && entry.message.role === "assistant") {
+      const message = entry.message as { provider?: unknown; model?: unknown };
+      if (typeof message.provider === "string" && typeof message.model === "string") {
+        return { provider: message.provider, modelId: message.model };
+      }
+    }
+  }
+  return null;
+}
+
 function getSessionSettings(entries: SessionEntry[], leafId?: string | null): Pick<SessionContext, "thinkingLevel" | "model"> {
   if (leafId === null) return { thinkingLevel: "off", model: null };
   const branch = sliceActiveBranch(entries, leafId ?? null, entries.length);
   let thinkingLevel: string | undefined;
-  let responseModel: SessionContext["model"] | undefined;
 
-  for (let i = branch.length - 1; i >= 0 && (thinkingLevel === undefined || responseModel === undefined); i--) {
+  for (let i = branch.length - 1; i >= 0 && thinkingLevel === undefined; i--) {
     const entry = branch[i];
-    if (thinkingLevel === undefined && entry.type === "thinking_level_change") {
+    if (entry.type === "thinking_level_change") {
       thinkingLevel = entry.thinkingLevel;
-    }
-    if (responseModel === undefined && entry.type === "message" && entry.message.role === "assistant") {
-      const message = entry.message as { provider?: unknown; model?: unknown };
-      if (typeof message.provider === "string" && typeof message.model === "string") {
-        responseModel = { provider: message.provider, modelId: message.model };
-      }
     }
   }
 
   return {
     thinkingLevel: thinkingLevel ?? "off",
-    model: getLatestModelChange(branch) ?? responseModel ?? null,
+    model: getLatestModelChange(branch) ?? getLatestResponseModel(branch),
   };
 }
 
@@ -663,6 +708,14 @@ export interface BuildSessionContextOptions {
   deferToolResultImages?: boolean;
   tail?: number;
   excludeLeaf?: boolean;
+  /**
+   * Let a page run past `tail` to open on a whole turn (its leading user
+   * message) instead of cutting a turn in half. Chat-view loads set this so a
+   * window that stops mid-turn does not render that turn's leading messages
+   * flat. API callers leave it unset: for them `tail` is an exact cap on the
+   * ancestor chain (the documented route contract, pinned by e2e).
+   */
+  wholeTurns?: boolean;
   /** Session id used to build lazy URLs for historical tool-result images. */
   sessionId?: string;
 }
@@ -672,11 +725,11 @@ export function buildSessionContext(
   leafId?: string | null,
   options: BuildSessionContextOptions = {},
 ): SessionContext {
-  const { tail, excludeLeaf } = options;
+  const { tail, excludeLeaf, wholeTurns } = options;
   // History pages retain the original branch order, including compacted messages.
   // SDK context filtering can drop a page's messages when firstKeptEntryId is outside it.
   const sliced = leafId === null ? [] : sliceActiveBranch(
-    entries, leafId ?? null, tail && tail > 0 ? tail : entries.length, excludeLeaf,
+    entries, leafId ?? null, tail && tail > 0 ? tail : entries.length, excludeLeaf, wholeTurns,
   );
   const hasMore = Boolean(tail && tail > 0 && sliced[0]?.parentId);
 
@@ -710,6 +763,7 @@ export function buildSessionContext(
  */
 function countsTowardTail(entry: SessionEntry): boolean {
   if (entry.type === "compaction") return true;
+  if (entry.type === "branch_summary") return Boolean((entry as { summary?: string }).summary);
   if (entry.type !== "message") return false;
   const role = (entry as { message?: { role?: string } }).message?.role;
   return role === "user" || role === "assistant";
@@ -735,6 +789,7 @@ export function sliceActiveBranch(
   leafId: string | null,
   tail: number,
   excludeLeaf = false,
+  wholeTurns = false,
 ): SessionEntry[] {
   if (tail <= 0) return entries;
   const byId = new Map<string, SessionEntry>();
@@ -755,8 +810,38 @@ export function sliceActiveBranch(
     if (visible >= tail || chain.length >= rawCap) break;
     current = current.parentId ? byId.get(current.parentId) : undefined;
   }
+  // A window that stops mid-turn renders that turn's leading messages flat —
+  // ChatWindow can only fold a turn into "Process details" from its anchor —
+  // until the older page arrives and they collapse. Walk back to the anchor
+  // so the page opens on whole turns; a turn too long to reach is left cut.
+  // `wholeTurns` is opt-in: without it `tail` is an exact cap (API contract).
+  if (wholeTurns && current && !startsTurn(current)) {
+    const extension: SessionEntry[] = [];
+    let cursor = current.parentId ? byId.get(current.parentId) : undefined;
+    while (cursor && extension.length < MAX_TURN_EXTENSION_ENTRIES) {
+      extension.push(cursor);
+      if (startsTurn(cursor)) {
+        chain.push(...extension);
+        break;
+      }
+      cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+    }
+  }
   chain.reverse();
   return chain;
+}
+
+/** Extra raw entries a page may take to reach the start of the turn it cut into. */
+const MAX_TURN_EXTENSION_ENTRIES = 1500;
+
+/** Entries that `isMessageGroupAnchor()` treats as the start of a displayed turn. */
+function startsTurn(entry: SessionEntry): boolean {
+  if (entry.type === "compaction") return true;
+  if (entry.type === "custom_message") {
+    return (entry as { customType?: string }).customType === "pi-web:subagent-notification";
+  }
+  if (entry.type === "branch_summary") return Boolean((entry as { summary?: string }).summary);
+  return entry.type === "message" && (entry as { message?: { role?: string } }).message?.role === "user";
 }
 function parseEntryTimestamp(timestamp: string): number | undefined {
   const parsed = Date.parse(timestamp);
@@ -848,9 +933,12 @@ function entryToUiMessage(
       // Transcript system messages carry the prompt and tool loadout (Pi >= 0.86).
       // They are provider input, not conversation, so they never render.
       if (entry.message.role === "system") return null;
+      // Tool-result details are projected to the fields the UI renders:
+      // extensions can persist megabytes there (see lib/tool-result-details.ts).
+      const normalized = slimToolResultMessage(normalizeToolCalls(entry.message));
       let message = options.deferToolResultImages
-        ? deferToolResultBase64Images(normalizeToolCalls(entry.message), options.sessionId, entry.id)
-        : normalizeToolCalls(entry.message);
+        ? deferToolResultBase64Images(normalized, options.sessionId, entry.id)
+        : normalized;
       const legacyContent = message.role === "assistant" ? (message as { content: unknown }).content : undefined;
       if (typeof legacyContent === "string") {
         message = { ...message, content: [{ type: "text", text: legacyContent }] } as AgentMessage;
@@ -880,9 +968,14 @@ function entryToUiMessage(
       };
     case "branch_summary":
       if (!entry.summary) return null;
+      // A divider like compaction, not a user bubble: it was never typed, so it must not
+      // offer Edit / Fork or be counted as the user's turn.
       return {
-        role: "user",
-        content: `*The conversation briefly explored another branch and returned with this summary:*\n\n${entry.summary}`,
+        role: "custom",
+        customType: "branch_summary",
+        content: entry.summary,
+        display: true,
+        details: entry.details,
         timestamp: parseEntryTimestamp(entry.timestamp),
       };
     case "custom_message":

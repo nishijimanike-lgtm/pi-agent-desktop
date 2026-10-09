@@ -1,15 +1,14 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useState, useCallback, useRef, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { listSessionFamilies } from "@/lib/session-family";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
-import { getProjectActivity, sessionsForProject } from "@/lib/project-groups";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
 import { useI18n } from "@/hooks/useI18n";
 import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
-import { formatRelativeTime } from "@/lib/i18n/format";
+import { formatCompactRelativeTime, formatRelativeTime } from "@/lib/i18n/format";
 import { createPortal } from "react-dom";
 import { ProjectPicker, selectProjectDirectoryNative } from "./ProjectPicker";
 import { AnimatedDropdown, PathLabel, displayCwd, getRecentProjects } from "./path-ui";
@@ -18,9 +17,20 @@ import { groupByProject } from "@/lib/project-group";
 import { notifyDesktop } from "@/lib/desktop-notify";
 import { revealItemInDirNative } from "@/lib/desktop-native";
 import { isTauriDesktop } from "@/lib/desktop-updater";
+import { menuPointBelow, showNativeMenu, type NativeMenuPoint } from "@/lib/desktop-menu";
 import { getDesktopPlatform, type DesktopPlatform } from "@/lib/desktop-window";
 import { useWindowDrag } from "./desktop";
+import { SessionSearch } from "./SessionSearch";
+import { ScheduledSidebarRow } from "./scheduled/ScheduledSidebarRow";
+import { isScheduledRunSession } from "@/hooks/useScheduledTasks";
 import { prefetchSessionData } from "@/lib/session-data-cache";
+import { isImeComposing } from "@/lib/ime";
+
+function sessionListUrl(summary: boolean, force: boolean): string {
+  if (summary) return "/api/sessions?summary=1";
+  if (force) return "/api/sessions?force=1";
+  return "/api/sessions";
+}
 interface Props {
   selectedSessionId: string | null;
   onSelectSession: (session: SessionInfo, isRestore?: boolean, entryId?: string, blockIndex?: number) => void;
@@ -36,12 +46,7 @@ interface Props {
     projectRoot?: string | null,
     projectKey?: string | null,
   ) => void;
-  onOpenFile?: (filePath: string, fileName: string, options?: { sourceSessionId?: string | null; modeHint?: "diff" }) => void;
   onOpenTerminal?: (cwd: string) => void;
-  explorerRefreshKey?: number;
-  onExplorerRefresh?: () => void;
-  onAtMention?: (relativePath: string, isDir: boolean) => void;
-  onAtMentions?: (relativePaths: string[]) => void;
   /** Fired when a session that is not currently selected finishes running.
    *  Lets the app play a cross-workspace completion tone. */
   onBackgroundTaskDone?: () => void;
@@ -50,6 +55,9 @@ interface Props {
   onProjectsChange?: (projectRoots: string[]) => void;
   onModelsVersionChange?: (version: number) => void;
   headerControls?: ReactNode;
+  /** Opens the Scheduled page; the row under New Session is absent without it. */
+  onOpenScheduled?: () => void;
+  scheduledOpen?: boolean;
 }
 
 interface WorktreeEntry {
@@ -85,41 +93,13 @@ interface ProjectSelection {
   key: string;
 }
 
-interface ValidatedProject {
-  cwd: string;
-  root: string;
-  key: string;
-}
+// Server error codes with a translation; any other code is shown verbatim.
+const FILE_MANAGER_ERROR_KEYS: Record<string, string> = {
+  remote: "sidebar.openInExplorerRemoteOnly",
+  "unsupported-platform": "sidebar.openInExplorerUnsupported",
+};
 
-const UNREAD_SESSIONS_STORAGE_KEY = "pi-web:unread-session-ids";
-const LAST_CUSTOM_CWD_STORAGE_KEY = "pi-web:last-custom-cwd";
-const RUNNING_SESSIONS_POLL_MS = 2500;
 const SESSION_DETAILS_HYDRATION_DELAY_MS = 750;
-
-/** `summary=1` paints from header metadata; `force=1` re-reads past the server's list cache. */
-function sessionListUrl(summary: boolean, force: boolean): string {
-  if (summary) return "/api/sessions?summary=1";
-  if (force) return "/api/sessions?force=1";
-  return "/api/sessions";
-}
-
-function loadLastCustomCwd(): string {
-  if (typeof window === "undefined") return "";
-  try {
-    return window.localStorage.getItem(LAST_CUSTOM_CWD_STORAGE_KEY) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function saveLastCustomCwd(cwd: string): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(LAST_CUSTOM_CWD_STORAGE_KEY, cwd);
-  } catch {
-    // Persistence is best-effort.
-  }
-}
 
 function loadUnreadSessionIds(): Set<string> {
   if (typeof window === "undefined") return new Set();
@@ -145,19 +125,6 @@ interface SessionTreeNode {
 const MAX_VISIBLE_PROJECT_SESSIONS = 5;
 
 const SESSION_LIST_ITEM_HEIGHT = 54;
-
-/** Virtualized session list: indices of the rows to mount. */
-export function getSessionListIndices(count: number, scrollTop: number, viewportHeight: number, focusedIndex = -1): number[] {
-  const overscan = 8;
-  const visibleCount = Math.ceil((viewportHeight || 600) / SESSION_LIST_ITEM_HEIGHT) + overscan * 2;
-  const start = Math.max(0, Math.min(Math.floor(scrollTop / SESSION_LIST_ITEM_HEIGHT) - overscan, count - visibleCount));
-  const end = Math.min(count, start + visibleCount);
-  const indices = Array.from({ length: end - start }, (_, offset) => start + offset);
-  // Keep a focused row mounted so scrolling cannot discard an inline rename.
-  if (focusedIndex >= 0 && focusedIndex < start) indices.unshift(focusedIndex);
-  if (focusedIndex >= end && focusedIndex < count) indices.push(focusedIndex);
-  return indices;
-}
 
 function treeContainsSession(node: SessionTreeNode, sessionId: string): boolean {
   return node.session.id === sessionId || node.children.some((child) => treeContainsSession(child, sessionId));
@@ -207,7 +174,7 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
   return roots;
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onProjectsChange, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange, onModelsVersionChange, headerControls, onOpenTerminal }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onProjectsChange, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange, onModelsVersionChange, headerControls, onOpenTerminal, onOpenScheduled, scheduledOpen = false }: Props) {
   const { t, locale } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   // Tracked in a ref only: the version is compared against the polled value to
@@ -228,6 +195,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const windowDrag = useWindowDrag();
   const [wtFilter, setWtFilter] = useState("");
   const [sessionQuery, setSessionQuery] = useState("");
+  // Content search (server-side, across every session) vs. the default title
+  // filter over the loaded project tree. Enter engages it; clearing the box
+  // (Escape or the clear button) drops back to the title filter.
+  const [contentSearch, setContentSearch] = useState(false);
   // Worktree switcher state
   const [worktreeState, setWorktreeState] = useState<WorktreeState | null>(null);
   const lastNotifiedProjectRef = useRef<{ cwd: string | null; key: string | null } | null>(null);
@@ -274,7 +245,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [wtPollTick, setWtPollTick] = useState(0);
   const wtDropdownRef = useRef<HTMLDivElement>(null);
   const wtNewInputRef = useRef<HTMLInputElement>(null);
-  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => new Set());
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => {
+    const stored = getPrefJson<unknown>(APP_PREF_KEYS.collapsedProjects);
+    return Array.isArray(stored)
+      ? new Set(stored.filter((root): root is string => typeof root === "string"))
+      : new Set();
+  });
   const [expandedProjectSessions, setExpandedProjectSessions] = useState<Set<string>>(() => new Set());
   const [archivedProjectRoots, setArchivedProjectRoots] = useState<Set<string>>(() => {
     const stored = getPrefJson<unknown>(APP_PREF_KEYS.archivedProjects);
@@ -292,6 +268,59 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [projectMenuPos, setProjectMenuPos] = useState<{ top: number; left: number } | null>(null);
   const [projectBranchMenu, setProjectBranchMenu] = useState<ProjectBranchMenuState | null>(null);
   const [projectBranchLoading, setProjectBranchLoading] = useState(false);
+  // "Open in file manager" on a project row. Only the server can raise a
+  // file-manager window, and only when the browser runs on that same machine,
+  // so the browser asks once and the menu shows the entry only where it works;
+  // the desktop shell reveals natively through revealItemInDirNative instead.
+  const [fileManagerAvailability, setFileManagerAvailability] = useState<{ supported: boolean; reason: string | null; platform: string } | null>(null);
+  const [projectRevealError, setProjectRevealError] = useState<string | null>(null);
+  useEffect(() => {
+    if (isTauriDesktop()) return;
+    let cancelled = false;
+    fetch("/api/open-in-explorer")
+      .then((res) => res.ok ? res.json() as Promise<{ supported: boolean; reason: string | null; platform: string }> : null)
+      .then((data) => { if (!cancelled && data) setFileManagerAvailability(data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  const revealProjectInFileManager = useCallback(async (root: string) => {
+    setProjectRevealError(null);
+    if (isTauriDesktop()) {
+      try {
+        await revealItemInDirNative(root);
+        setProjectMenu(null);
+      } catch (e) {
+        setProjectRevealError(e instanceof Error ? e.message : String(e));
+      }
+      return;
+    }
+    try {
+      const res = await fetch("/api/open-in-explorer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd: root }),
+      });
+      if (res.ok) {
+        setProjectMenu(null);
+        return;
+      }
+      const data = await res.json().catch(() => ({})) as { error?: string };
+      const key = FILE_MANAGER_ERROR_KEYS[data.error ?? ""];
+      setProjectRevealError(key ? t(key) : (data.error ?? `HTTP ${res.status}`));
+    } catch (e) {
+      setProjectRevealError(e instanceof Error ? e.message : String(e));
+    }
+  }, [t]);
+  const fileManagerPlatform = isTauriDesktop()
+    ? (desktopPlatform === "macos" ? "darwin" : desktopPlatform === "windows" ? "win32" : "linux")
+    : fileManagerAvailability?.platform;
+  const revealProjectLabel = t(
+    fileManagerPlatform === "darwin"
+      ? "sidebar.openInFinder"
+      : fileManagerPlatform === "win32"
+        ? "sidebar.openInExplorer"
+        : "sidebar.openInFileManager",
+  );
   const projectMenuRef = useRef<HTMLDivElement>(null);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
@@ -304,45 +333,22 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // Once polling has delivered a snapshot it is the source of truth for
   // running state; late /api/sessions responses must not overwrite it.
   const sseAuthoritativeRef = useRef(false);
-  // Virtualized session list: only the visible window of rows is mounted.
+  const detailsHydrationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Overlay-style scrollbar: `is-scrolling` shows the thumb only while the
+  // project tree is actually scrolling.
   const listScrollHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const listScrollRef = useRef<HTMLDivElement>(null);
-  const [listViewportH, setListViewportH] = useState(0);
-  const [listScrollTop, setListScrollTop] = useState(0);
-  const listScrollRafRef = useRef<number | null>(null);
-  const listScrollTopRef = useRef(0);
-  const renderedListScrollTopRef = useRef(0);
   const handleListScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
-    // Overlay-style scrollbar: only visible while the list is actually scrolling.
     e.currentTarget.classList.add("is-scrolling");
     if (listScrollHideTimerRef.current) clearTimeout(listScrollHideTimerRef.current);
     listScrollHideTimerRef.current = setTimeout(() => {
-      const el = listScrollRef.current;
-      if (el) el.classList.remove("is-scrolling");
+      listScrollRef.current?.classList.remove("is-scrolling");
       listScrollHideTimerRef.current = null;
     }, 800);
-    const top = e.currentTarget.scrollTop;
-    if (listScrollRafRef.current != null) return;
-    listScrollRafRef.current = requestAnimationFrame(() => {
-      listScrollRafRef.current = null;
-      const nextTop = Math.floor(listScrollTopRef.current / SESSION_LIST_ITEM_HEIGHT) * SESSION_LIST_ITEM_HEIGHT;
-      if (renderedListScrollTopRef.current === nextTop) return;
-      renderedListScrollTopRef.current = nextTop;
-      setListScrollTop(nextTop);
-    });
   }, []);
-  useLayoutEffect(() => {
-    const el = listScrollRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) setListViewportH(entry.contentRect.height);
-    });
-    ro.observe(el);
-    setListViewportH(el.clientHeight);
-    listScrollTopRef.current = el.scrollTop;
-    renderedListScrollTopRef.current = Math.floor(el.scrollTop / SESSION_LIST_ITEM_HEIGHT) * SESSION_LIST_ITEM_HEIGHT;
-    setListScrollTop(renderedListScrollTopRef.current);
-    return () => ro.disconnect();
+  useEffect(() => () => {
+    if (listScrollHideTimerRef.current) clearTimeout(listScrollHideTimerRef.current);
   }, []);
 
   const loadSessions = useCallback(async (showLoading = false, force = false, summary = false) => {
@@ -428,8 +434,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [archivedProjectRoots]);
 
   useEffect(() => {
-    setPrefJson(APP_PREF_KEYS.customProjects, [...customProjectRoots]);
-  }, [customProjectRoots]);
+    if (collapsedProjects.size === 0) removePref(APP_PREF_KEYS.collapsedProjects);
+    else setPrefJson(APP_PREF_KEYS.collapsedProjects, [...collapsedProjects]);
+  }, [collapsedProjects]);
 
   const onModelsVersionChangeRef = useRef(onModelsVersionChange);
   useEffect(() => {
@@ -527,8 +534,17 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         .filter((session) => session.relation?.kind === "subagent")
         .map((session) => session.id),
     );
+    // A scheduled run says how it ended (and what failed) through its own notification.
+    const knownScheduledIds = new Set(
+      allSessions
+        .filter((session) => session.relation?.kind === "scheduled")
+        .map((session) => session.id),
+    );
     const completedWithNotifications = completedInBackground.filter(
-      (id) => !previousSuppressedCompletionSessionIdsRef.current.has(id) && !knownSubagentIds.has(id),
+      (id) => !previousSuppressedCompletionSessionIdsRef.current.has(id)
+        && !knownSubagentIds.has(id)
+        && !knownScheduledIds.has(id)
+        && !isScheduledRunSession(id),
     );
     const newlyRunning = [...runningSessionIds].filter((id) => !previous.has(id));
 
@@ -863,9 +879,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }
   }, []);
 
-  const handleSwitchProjectBranch = useCallback(async (projectRoot: string, branch: string) => {
+  const handleSwitchProjectBranch = useCallback(async (projectRoot: string, branch: string, loaded?: ProjectBranchMenuState) => {
     if (wtSwitchingBranch) return;
-    const branchData = projectBranchMenu?.root === projectRoot ? projectBranchMenu : null;
+    const branchData = loaded ?? (projectBranchMenu?.root === projectRoot ? projectBranchMenu : null);
     const checkout = branchData?.worktrees.find((w) => w.path === selectedCwd)
       ?? branchData?.worktrees.find((w) => w.isMain)
       ?? null;
@@ -1080,8 +1096,76 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     setProjectMenuPos(null);
   }, []);
 
+  // Desktop shell: native popup versions of the project menu and its branch
+  // list. `projectMenu` stays set while one is up (it keeps the row's "…"
+  // visible) but `projectMenuPos` stays null, so the DOM menu never renders.
+  const showNativeBranchMenu = useCallback(async (projectRoot: string, at: NativeMenuPoint) => {
+    let data: ProjectBranchMenuState;
+    try {
+      const res = await fetch(`/api/worktrees?cwd=${encodeURIComponent(projectRoot)}&branches=1`);
+      const body = await res.json().catch(() => ({})) as {
+        projectRoot?: string;
+        branches?: string[];
+        remoteBranches?: string[];
+        worktrees?: WorktreeEntry[];
+      };
+      if (!res.ok || body.projectRoot !== projectRoot) throw new Error(`HTTP ${res.status}`);
+      data = {
+        root: projectRoot,
+        branches: Array.isArray(body.branches) ? body.branches : [],
+        remoteBranches: Array.isArray(body.remoteBranches) ? body.remoteBranches : [],
+        worktrees: Array.isArray(body.worktrees) ? body.worktrees : [],
+        loaded: true,
+      };
+    } catch {
+      data = { root: projectRoot, branches: [], remoteBranches: [], worktrees: [], loaded: true };
+    }
+    const checkout = data.worktrees.find((w) => w.path === selectedCwd) ?? data.worktrees.find((w) => w.isMain);
+    const names = [
+      ...data.branches.map((name) => ({ name, remote: false })),
+      ...data.remoteBranches.map((name) => ({ name, remote: true })),
+    ];
+    await showNativeMenu(
+      names.length === 0
+        ? [{ label: t("sidebar.noOtherBranches"), disabled: true }]
+        : names.map(({ name, remote }) => {
+            const holder = data.worktrees.find((w) => w.branch === name && w.path !== checkout?.path);
+            const tag = holder ? "worktree" : remote ? t("sidebar.remoteBranchTag") : "";
+            return {
+              label: tag ? `${name}  ·  ${tag}` : name,
+              checked: checkout?.branch === name,
+              disabled: wtSwitchingBranch !== null,
+              onSelect: () => void handleSwitchProjectBranch(projectRoot, name, data),
+            };
+          }),
+      at,
+    );
+  }, [handleSwitchProjectBranch, selectedCwd, t, wtSwitchingBranch]);
+
+  const showNativeProjectMenu = useCallback(async (projectRoot: string, at: NativeMenuPoint): Promise<boolean> => {
+    setProjectMenu({ root: projectRoot });
+    setProjectMenuPos(null);
+    setProjectBranchMenu(null);
+    setProjectRevealError(null);
+    const shown = await showNativeMenu([
+      { label: `${t("sidebar.switchBranch")}…`, onSelect: () => void showNativeBranchMenu(projectRoot, at) },
+      ...(onOpenTerminal
+        ? [{ label: t("sidebar.openTerminalHere"), onSelect: () => onOpenTerminal(projectRoot) }]
+        : []),
+      { label: revealProjectLabel, onSelect: () => void revealProjectInFileManager(projectRoot) },
+      { kind: "separator" as const },
+      { label: t("sidebar.archiveProject"), onSelect: () => archiveProject(projectRoot) },
+    ], at);
+    setProjectMenu((current) => (current?.root === projectRoot ? null : current));
+    return shown;
+  }, [archiveProject, onOpenTerminal, revealProjectInFileManager, revealProjectLabel, showNativeBranchMenu, t]);
+
   const openProjectMenu = useCallback((e: React.MouseEvent<HTMLButtonElement>, projectRoot: string) => {
     e.stopPropagation();
+    if (isTauriDesktop()) {
+      void showNativeProjectMenu(projectRoot, menuPointBelow(e.currentTarget));
+      return;
+    }
     if (projectMenu?.root === projectRoot) {
       setProjectMenu(null);
       setProjectMenuPos(null);
@@ -1098,15 +1182,19 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     setProjectMenu({ root: projectRoot });
     setProjectMenuPos({ top, left });
     setProjectBranchMenu(null);
-  }, [projectMenu]);
+    setProjectRevealError(null);
+  }, [projectMenu, showNativeProjectMenu]);
 
   // Phase A: project tree — groups sessions by project root. Sorting is
   const trimmedSessionQuery = sessionQuery.trim().toLowerCase();
+  // Runs of scheduled tasks live under Scheduled, not in the project tree: an
+  // hourly task would otherwise bury the sessions the user started themselves.
+  const treeSessions = allSessions.filter((session) => session.relation?.kind !== "scheduled");
   const filteredSessions = trimmedSessionQuery
-    ? allSessions.filter((session) =>
+    ? treeSessions.filter((session) =>
         (session.name ?? "").toLowerCase().includes(trimmedSessionQuery)
         || session.firstMessage.toLowerCase().includes(trimmedSessionQuery))
-    : allSessions;
+    : treeSessions;
   const sessionFamilies = listSessionFamilies(filteredSessions);
   const candidateRoots = useMemo(() => {
     const roots = new Set<string>(customProjectRoots);
@@ -1205,44 +1293,59 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       if (!isActive) setSelectedCwd(group.projectRoot);
     };
 
+    const isMenuOpen = projectMenu?.root === group.projectRoot;
+    const rowTitle = branchSubtitle ? `${group.projectRoot} · ${branchSubtitle}` : group.projectRoot;
+
     return (
       <div key={group.projectRoot} className={`sidebar-project-tree-group${isCollapsed ? " is-collapsed" : ""}${isActive ? " is-active" : ""}`}>
-        <div className="sidebar-project-tree-row">
+        <div className={`sidebar-project-tree-row${isMenuOpen ? " is-menu-open" : ""}`}>
           <button
             type="button"
             className="sidebar-project-tree-row-main"
             onClick={toggleCollapse}
             aria-expanded={!isCollapsed}
-            title={group.projectRoot}
+            title={rowTitle}
           >
             <span className="sidebar-project-tree-folder" aria-hidden="true">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+              {/* Closed folder vs. folder with its flap lifted; the closed one
+                  carries a faint fill so the pair reads as shut / open. */}
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
                 {isCollapsed ? (
-                  <path d="M3.5 6.5a1.5 1.5 0 0 1 1.5-1.5h4l2 2h8a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5Z" />
+                  <path
+                    d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
+                    fill="currentColor"
+                    fillOpacity="0.1"
+                  />
                 ) : (
-                  <path d="M3.5 7.5h6l2 2H21l-2 9.5H5a1.5 1.5 0 0 1-1.5-1.5Z" />
+                  <path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />
                 )}
               </svg>
             </span>
             <span className="sidebar-project-tree-name">{group.displayName}</span>
-            {branchSubtitle && (
-              <span className="sidebar-project-tree-branch" title={branchSubtitle}>
-                {branchSubtitle}
+            {/* A folded project hides its rows, so the count (and any running
+                or unread chips) must stay readable on the header itself. */}
+            {isCollapsed && (
+              <span className="sidebar-project-tree-count" title={t("sidebar.sessionCount", { count: groupTree.length })}>
+                ({groupTree.length})
               </span>
             )}
-            <span className="sidebar-project-tree-meta">
-              {runningCount > 0 && (
-                <span className="sidebar-project-tree-chip is-running" title={t("sidebar.runningCount", { count: runningCount })}>
-                  {runningCount}
-                </span>
-              )}
-              {unreadCount > 0 && (
-                <span className="sidebar-project-tree-chip is-unread" title={t("sidebar.unreadCount", { count: unreadCount })}>
-                  {unreadCount}
-                </span>
-              )}
-            </span>
+            {isCollapsed && (
+              <span className="sidebar-project-tree-meta">
+                {runningCount > 0 && (
+                  <span className="sidebar-project-tree-chip is-running" title={t("sidebar.runningCount", { count: runningCount })}>
+                    {runningCount}
+                  </span>
+                )}
+                {unreadCount > 0 && (
+                  <span className="sidebar-project-tree-chip is-unread" title={t("sidebar.unreadCount", { count: unreadCount })}>
+                    {unreadCount}
+                  </span>
+                )}
+              </span>
+            )}
           </button>
+          {/* Hover-only overlay, left of the chevron: it covers the tail of a
+              long name instead of reserving width the rest of the time. */}
           <div className="sidebar-project-tree-row-actions" data-no-drag>
             <button
               type="button"
@@ -1262,7 +1365,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               onClick={(e) => openProjectMenu(e, group.projectRoot)}
               title={t("sidebar.moreActions")}
               aria-label={t("sidebar.moreActions")}
-              aria-expanded={projectMenu?.root === group.projectRoot}
+              aria-expanded={isMenuOpen}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <circle cx="5" cy="12" r="1.6" />
@@ -1271,6 +1374,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               </svg>
             </button>
           </div>
+          {/* Redundant with the row button for keyboards and screen readers. */}
+          <button
+            type="button"
+            className="sidebar-project-tree-chevron-button"
+            onClick={toggleCollapse}
+            tabIndex={-1}
+            aria-hidden="true"
+          >
+            <svg className="sidebar-project-tree-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </button>
         </div>
         {!isCollapsed && (
           <div className="sidebar-project-tree-children">
@@ -1365,6 +1480,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           {t("sidebar.newChat")}
         </button>
 
+        {onOpenScheduled && <ScheduledSidebarRow active={scheduledOpen} onOpen={onOpenScheduled} />}
+
         {/* Row 2: current folder — flat row */}
         <div className="sidebar-folder-row" data-no-drag style={{ display: showLegacyHeaderProjectRows ? "flex" : "none", alignItems: "center", gap: 2 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -1451,7 +1568,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                         value={wtFilter}
                         onChange={(e) => setWtFilter(e.target.value)}
                         onKeyDown={(e) => {
-                          if (e.key === "Escape") {
+                          if (e.key === "Escape" && !isImeComposing(e)) {
                             setWtFilter("");
                             setWtDropdownOpen(false);
                           }
@@ -1724,6 +1841,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                           setWtError(null);
                         }}
                         onKeyDown={(e) => {
+                          if (isImeComposing(e)) return;
                           if (e.key === "Enter") {
                             e.preventDefault();
                             void handleCreateWorktree();
@@ -1851,8 +1969,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           </button>
         )}
       </div>
-      {/* Session search — keeps the original sidebar search styling and
-          narrows the project tree to matching titles / first messages. */}
+{/* Session search — keeps the original sidebar search styling and
+          narrows the project tree to matching titles / first messages. Enter is
+          the confirmation for the server-side content search across every
+          session; there is no mode button, so Escape (or the clear button) is
+          the way back to the title filter. */}
       <div className="sidebar-search-wrap" data-no-drag>
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="sidebar-search-icon">
           <circle cx="11" cy="11" r="7" />
@@ -1864,12 +1985,22 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           value={sessionQuery}
           onChange={(e) => setSessionQuery(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Escape") {
+            if (e.key === "Enter") {
+              // Committing an IME candidate must not fire the search.
+              if (isImeComposing(e) || !sessionQuery.trim()) return;
+              e.preventDefault();
+              setContentSearch(true);
+              return;
+            }
+            if (e.key === "Escape" && !isImeComposing(e)) {
               e.stopPropagation();
-              if (sessionQuery) setSessionQuery("");
+              // Content results first, then the query, then the field itself.
+              if (contentSearch) setContentSearch(false);
+              else if (sessionQuery) setSessionQuery("");
               else e.currentTarget.blur();
             }
           }}
+          title={t("sidebar.searchAllHint")}
           placeholder={t("sidebar.searchSessions")}
           aria-label={t("sidebar.searchSessions")}
         />
@@ -1877,7 +2008,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           <button
             type="button"
             className="sidebar-search-clear"
-            onClick={() => setSessionQuery("")}
+            onClick={() => {
+              setSessionQuery("");
+              setContentSearch(false);
+            }}
             title={t("sidebar.clearSearch")}
             aria-label={t("sidebar.clearSearch")}
           >
@@ -1897,6 +2031,21 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         <div className="sidebar-project-tree-empty">
           {loading
             ? t("sidebar.loading")
+            : error
+              ? (
+                // A failed list load must not read as "no projects": that
+                // offers "Add project" as if the user's sessions were gone.
+                <div className="sidebar-empty-action" role="alert">
+                  <span className="sidebar-empty-text" title={error}>{t("sidebar.loadFailed")}</span>
+                  <button
+                    type="button"
+                    className="sidebar-empty-add"
+                    onClick={() => void loadSessions(true, true)}
+                  >
+                    <span>{t("common.retry")}</span>
+                  </button>
+                </div>
+              )
             : trimmedSessionQuery
               ? t("sidebar.noMatchingSessions")
               : (
@@ -1919,7 +2068,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               )}
         </div>
       ) : (
-        <div className="sidebar-project-tree" onScroll={handleListScroll}>
+        <SessionSearch
+          open={contentSearch}
+          query={sessionQuery}
+          selectedSessionId={selectedSessionId}
+          onSelectSession={handleSelectSessionFromList}
+        >
+        <div ref={listScrollRef} className="sidebar-project-tree" onScroll={handleListScroll}>
           <div className="sidebar-project-tree-header">
             <span className="sidebar-project-tree-title">{t("sidebar.projects")}</span>
             <div className="sidebar-project-tree-tools">
@@ -1928,7 +2083,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 title={t("sidebar.moreActions")}
                 aria-label={t("sidebar.moreActions")}
                 onClick={() => {
-                  if (collapsedProjects.size === 0) {
+                  if (allProjects.some((g) => !collapsedProjects.has(g.projectRoot))) {
                     setCollapsedProjects(new Set(allProjects.map((g) => g.projectRoot)));
                   } else {
                     setCollapsedProjects(new Set());
@@ -1957,6 +2112,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           </div>
           {activeProjects.map((group) => renderProjectGroup(group))}
         </div>
+        </SessionSearch>
       )}
       {projectMenu && projectMenuPos && createPortal(
         <div
@@ -1986,6 +2142,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 >
                   {t("sidebar.openTerminalHere")}
                 </button>
+              )}
+              {(isTauriDesktop() || fileManagerAvailability?.supported) && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => void revealProjectInFileManager(projectMenu.root)}
+                >
+                  {revealProjectLabel}
+                </button>
+              )}
+              {projectRevealError && (
+                <div className="sidebar-project-context-menu-hint" role="alert">{projectRevealError}</div>
               )}
               <button
                 type="button"
@@ -2368,17 +2536,72 @@ function SessionItem({
 
   // "…" menu: fixed-position portal so the sidebar's overflow/backdrop-filter can't clip it
   const MENU_WIDTH = 190;
+  // Desktop shell: the same actions as the DOM menu below, as a native popup.
+  // `menuOpen` stays true while it is up so the trailing "…" button does not
+  // swap back to the timestamp; `menuPos` stays null, so no DOM menu renders.
+  const showNativeSessionMenu = useCallback(async (at: NativeMenuPoint): Promise<boolean> => {
+    if (session.transient) return false;
+    setMenuOpen(true);
+    const shown = await showNativeMenu([
+      { label: t("sidebar.rename"), onSelect: startRename },
+      { label: t("sidebar.delete"), onSelect: () => setConfirmDelete(true) },
+      { kind: "separator" },
+      {
+        label: `${formatRelativeTime(session.modified, locale)} · ${t("sidebar.messagesCount", { count: session.messageCount })}`,
+        disabled: true,
+      },
+      ...((session.compactionCount ?? 0) > 0
+        ? [{ label: t("sidebar.compactionCount", { count: session.compactionCount ?? 0 }), disabled: true }]
+        : []),
+      ...(session.worktreeBranch ? [{ label: session.worktreeBranch, disabled: true }] : []),
+    ], at);
+    setMenuOpen(false);
+    return shown;
+  }, [locale, session.compactionCount, session.messageCount, session.modified, session.transient, session.worktreeBranch, startRename, t]);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const handled = dispatchSessionRowContextMenu({
+      id: session.id,
+      path: session.path,
+      cwd: session.cwd,
+      name: session.name,
+      clientX: e.clientX,
+      clientY: e.clientY,
+      refresh: () => { onRenamed?.(); },
+    });
+    if (handled) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    // Replace the webview's own context menu (Reload / Inspect) with the row's actions.
+    if (isTauriDesktop() && !session.transient) {
+      e.preventDefault();
+      e.stopPropagation();
+      void showNativeSessionMenu({ x: e.clientX, y: e.clientY });
+    }
+  }, [onRenamed, session.cwd, session.id, session.name, session.path, session.transient, showNativeSessionMenu]);
+
   const toggleMenu = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     if (menuOpen) { setMenuOpen(false); return; }
     const rect = e.currentTarget.getBoundingClientRect();
-    const estHeight = 124;
-    const left = Math.max(8, Math.min(rect.right - MENU_WIDTH, window.innerWidth - MENU_WIDTH - 8));
-    let top = rect.bottom + 4;
-    if (top + estHeight > window.innerHeight - 8) top = rect.top - estHeight - 4;
-    setMenuPos({ top, left });
-    setMenuOpen(true);
-  }, [menuOpen]);
+    const openDomMenu = () => {
+      const estHeight = 124;
+      const left = Math.max(8, Math.min(rect.right - MENU_WIDTH, window.innerWidth - MENU_WIDTH - 8));
+      let top = rect.bottom + 4;
+      if (top + estHeight > window.innerHeight - 8) top = rect.top - estHeight - 4;
+      setMenuPos({ top, left });
+      setMenuOpen(true);
+    };
+    if (isTauriDesktop()) {
+      void showNativeSessionMenu(menuPointBelow(e.currentTarget)).then((shown) => {
+        if (!shown) openDomMenu();
+      });
+      return;
+    }
+    openDomMenu();
+  }, [menuOpen, showNativeSessionMenu]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -2388,7 +2611,7 @@ function SessionItem({
       if (menuButtonRef.current?.contains(target)) return;
       setMenuOpen(false);
     };
-    const onKeyDown = (ev: KeyboardEvent) => { if (ev.key === "Escape") setMenuOpen(false); };
+    const onKeyDown = (ev: KeyboardEvent) => { if (ev.key === "Escape" && !isImeComposing(ev)) setMenuOpen(false); };
     const onScrollOrResize = () => setMenuOpen(false);
     document.addEventListener("mousedown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
@@ -2412,20 +2635,6 @@ function SessionItem({
     setConfirmDelete(false);
   }, []);
 
-  const handleContextMenu = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    const handled = dispatchSessionRowContextMenu({
-      id: session.id,
-      path: session.path,
-      cwd: session.cwd,
-      name: session.name,
-      clientX: e.clientX,
-      clientY: e.clientY,
-      refresh: () => { onRenamed?.(); },
-    });
-    if (!handled) return;
-    e.preventDefault();
-    e.stopPropagation();
-  }, [onRenamed, session.cwd, session.id, session.name, session.path]);
 
   // Fixed-height outer wrapper — content swaps in place so the list never reflows
   return (
@@ -2509,6 +2718,7 @@ function SessionItem({
           onChange={(e) => setRenameValue(e.target.value)}
           onBlur={commitRename}
           onKeyDown={(e) => {
+            if (isImeComposing(e)) return;
             if (e.key === "Enter") commitRename();
             if (e.key === "Escape") setRenaming(false);
           }}
@@ -2583,34 +2793,59 @@ function SessionItem({
             </button>
           )}
 
-          {/* Action buttons — shown on hover (or always on touch devices,
-              which have no hover); transient runtime rows expose no
-              disk-backed actions. Also stays up for selection/open menu. */}
-          {(hovered || touchMode) && !session.transient && (
-            <button
-              ref={menuButtonRef}
-              onClick={toggleMenu}
-              title={t("sidebar.moreActions")}
-              aria-label={t("sidebar.moreActions")}
-              aria-haspopup="menu"
-              aria-expanded={menuOpen}
+          {/* Trailing slot: the row's last-activity time at rest, swapped in
+              place for the "…" action button on hover (always the button on
+              touch devices, which have no hover, and while its menu is open,
+              since the pointer then sits on the portal). Transient runtime
+              rows expose no disk-backed actions and have no reliable time.
+              The slot keeps one fixed width so the title never reflows. */}
+          {!session.transient && (
+            <div
+              className="session-item-trailing"
               style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                width: 24, height: 24, padding: 0, flexShrink: 0,
-                background: menuOpen ? "var(--bg-selected)" : "none",
-                border: "none", borderRadius: 6,
-                color: "var(--text-muted)", cursor: "pointer",
-                transition: "background 0.12s, color 0.12s",
+                display: "flex", alignItems: "center", justifyContent: "flex-end",
+                width: 28, height: 24, flexShrink: 0,
               }}
-              onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-selected)"; e.currentTarget.style.color = "var(--text)"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = menuOpen ? "var(--bg-selected)" : "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <circle cx="5" cy="12" r="1.7" />
-                <circle cx="12" cy="12" r="1.7" />
-                <circle cx="19" cy="12" r="1.7" />
-              </svg>
-            </button>
+              {hovered || touchMode || menuOpen ? (
+                <button
+                  ref={menuButtonRef}
+                  onClick={toggleMenu}
+                  title={t("sidebar.moreActions")}
+                  aria-label={t("sidebar.moreActions")}
+                  aria-haspopup="menu"
+                  aria-expanded={menuOpen}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 24, height: 24, padding: 0, flexShrink: 0,
+                    background: menuOpen ? "var(--bg-selected)" : "none",
+                    border: "none", borderRadius: 6,
+                    color: "var(--text-muted)", cursor: "pointer",
+                    transition: "background 0.12s, color 0.12s",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-selected)"; e.currentTarget.style.color = "var(--text)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = menuOpen ? "var(--bg-selected)" : "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <circle cx="5" cy="12" r="1.7" />
+                    <circle cx="12" cy="12" r="1.7" />
+                    <circle cx="19" cy="12" r="1.7" />
+                  </svg>
+                </button>
+              ) : (
+                <span
+                  className="session-item-time"
+                  title={formatRelativeTime(session.modified, locale)}
+                  style={{
+                    fontSize: 11, lineHeight: 1, color: "var(--text-dim)",
+                    whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums",
+                    paddingRight: 2,
+                  }}
+                >
+                  {formatCompactRelativeTime(session.modified, locale)}
+                </span>
+              )}
+            </div>
           )}
 
           {menuOpen && menuPos && createPortal(
@@ -2671,6 +2906,9 @@ function SessionItem({
                 <div title={session.created}>
                   {formatRelativeTime(session.modified, locale)} · {t("sidebar.messagesCount", { count: session.messageCount })}
                 </div>
+                {(session.compactionCount ?? 0) > 0 && (
+                  <div>{t("sidebar.compactionCount", { count: session.compactionCount ?? 0 })}</div>
+                )}
                 {session.worktreeBranch && (
                   <div title={`Worktree: ${session.cwd}`} style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--accent)", minWidth: 0 }}>
                     <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>

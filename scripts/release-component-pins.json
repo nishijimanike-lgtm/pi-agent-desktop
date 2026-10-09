@@ -1,10 +1,10 @@
 {
   "pi": {
-    "version": "0.86.1",
-    "reason": "Synced to pi 0.86.1 via upstream pi-web upgrade and verified by full test suite."
+    "version": "1.1.0",
+    "reason": "Upgrade the bundled SDK to pi 1.1.0; packaged Code mode re-verified (quickjs-wasi is hoisted, see scripts/stage-package.mjs)."
   },
   "pi-web": {
     "version": "0.10.0",
-    "reason": "Merged upstream pi-web through main@1eb5e66 (segments A-E); fork adaptations documented in AGENTS.md."
+    "reason": "Merged upstream pi-web through main@6fcd7d4 (segments A-G); fork adaptations documented in AGENTS.md."
   }
 }

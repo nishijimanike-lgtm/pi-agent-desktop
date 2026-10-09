@@ -6,6 +6,8 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
+    // Literal apiKey values never leave the server; shell/env references and
+    // every other field are configuration the editor needs to see.
     return NextResponse.json(redactModelsJson(readModelsConfig()));
   } catch (error) {
     if (error instanceof ModelsConfigReadError) {

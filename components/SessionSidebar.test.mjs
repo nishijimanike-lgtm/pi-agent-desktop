@@ -1,37 +1,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { createJiti } from "jiti";
-
-const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
-const { getSessionListIndices } = await jiti.import("./SessionSidebar.tsx");
 
 const source = await readFile(new URL("./SessionSidebar.tsx", import.meta.url), "utf8");
-const globalStyles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 const sessionItemSource = source.slice(source.indexOf("function SessionItem("));
-
-test("scrolling keeps the focused session and the viewport mounted without expanding the whole window", () => {
-  for (const [scrollTop, focusedIndex] of [[0, 1999], [10000, 0]]) {
-    const indices = getSessionListIndices(2000, scrollTop, 335, focusedIndex);
-    const firstVisible = Math.floor(scrollTop / 54);
-    const lastVisible = Math.ceil((scrollTop + 335) / 54) - 1;
-    for (let index = firstVisible; index <= lastVisible; index++) assert.ok(indices.includes(index));
-    assert.ok(indices.includes(focusedIndex));
-    assert.equal(indices.length, 24);
-    assert.equal(new Set(indices).size, indices.length);
-    assert.deepEqual(indices, [...indices].sort((a, b) => a - b));
-  }
-  assert.equal(getSessionListIndices(2000, 0, 335, 3).length, 23);
-  const blurred = getSessionListIndices(2000, 10000, 335);
-  assert.equal(blurred.length, 23);
-  assert.ok(!blurred.includes(0));
-});
-
-test("session windows stay valid after a project shrinks and before the viewport is measured", () => {
-  assert.deepEqual(getSessionListIndices(5, 80000, 335, 1999), [0, 1, 2, 3, 4]);
-  assert.deepEqual(getSessionListIndices(0, 80000, 335, 1999), []);
-  assert.equal(getSessionListIndices(2000, 0, 0).length, 28);
-});
 
 test("only Shift+click bypasses session deletion confirmation", () => {
   // Deleting without Shift must always route through the confirmation step.
@@ -108,7 +80,7 @@ test("includes project activity counts in accessible labels", () => {
 });
 
 test("formats session timestamps with the active locale", () => {
-  assert.match(source, /import \{ formatRelativeTime \} from "@\/lib\/i18n\/format"/);
+  assert.match(source, /import \{ formatCompactRelativeTime, formatRelativeTime \} from "@\/lib\/i18n\/format"/);
   assert.match(sessionItemSource, /const \{ locale, t \} = useI18n\(\)/);
   assert.match(sessionItemSource, /formatRelativeTime\(session\.modified, locale\)/);
 });
@@ -143,12 +115,70 @@ test("lifecycle refreshes bypass the cache while cross-window polling reuses it"
 
 test("does not expose disk-backed actions for transient sessions", () => {
   assert.match(sessionItemSource, /if \(session\.transient\) return;/);
-  assert.match(sessionItemSource, /\{\(hovered \|\| touchMode\) && !session\.transient && \(/);
+  assert.match(sessionItemSource, /\{!session\.transient && \(\s*<div\s+className="session-item-trailing"/);
 });
 
 test("hides subagent rows and aggregates their state into the main session row", () => {
-  assert.match(source, /const sessionFamilies = useMemo\(\(\) => listSessionFamilies\(filteredSessions\)/);
+  assert.match(source, /const sessionFamilies = listSessionFamilies\(filteredSessions\)/);
   assert.match(source, /familySessions\.some\(\(session\) => session\.id === selectedSessionId\)/);
   assert.match(source, /familySessions\.some\(\(session\) => runningSessionIds\.has\(session\.id\)\)/);
   assert.doesNotMatch(source, /function SessionTreeItem/);
+});
+
+test("the project context menu reveals the project in the OS file manager", () => {
+  // Upstream's open-in-file-manager (#907) reaches the fork through the
+  // project context menu: the desktop shell reveals natively and the browser
+  // goes through /api/open-in-explorer, which the menu only offers after the
+  // availability probe answered. A failure stays visible inside the menu.
+  assert.match(source, /const revealProjectInFileManager = useCallback/);
+  assert.match(source, /isTauriDesktop\(\) \|\| fileManagerAvailability\?\.supported/);
+  assert.match(source, /revealItemInDirNative\(root\)/);
+  assert.match(source, /fetch\("\/api\/open-in-explorer", \{\s*method: "POST"/);
+  assert.match(source, /FILE_MANAGER_ERROR_KEYS\[data\.error \?\? ""\]/);
+  assert.match(source, /\{projectRevealError && \(/);
+  // The platform-adaptive label (Finder / Explorer / generic).
+  assert.match(source, /"sidebar\.openInFinder"/);
+  assert.match(source, /"sidebar\.openInExplorer"/);
+  assert.match(source, /"sidebar\.openInFileManager"/);
+});
+
+test("session rows swap a compact time for the action button in one fixed-width slot", () => {
+  // At rest the row shows its last-activity time; hover, touch and an open
+  // menu show the "…" button in the same slot so the title never reflows.
+  assert.match(sessionItemSource, /className="session-item-trailing"/);
+  assert.match(sessionItemSource, /hovered \|\| touchMode \|\| menuOpen \?/);
+  assert.match(sessionItemSource, /formatCompactRelativeTime\(session\.modified, locale\)/);
+  // Transient runtime rows have neither actions nor a reliable time.
+  assert.match(sessionItemSource, /\{!session\.transient && \(\s*<div\s+className="session-item-trailing"/);
+});
+
+test("project header shows a session count and chips only while folded", () => {
+  // A folded project hides its rows, so the header carries the count.
+  assert.match(source, /\{isCollapsed && \(\s*<span className="sidebar-project-tree-count"[^>]*>\s*\(\{groupTree\.length\}\)/);
+  assert.match(source, /\{isCollapsed && \(\s*<span className="sidebar-project-tree-meta">/);
+  // The branch moved from the row into its tooltip.
+  assert.doesNotMatch(source, /className="sidebar-project-tree-branch"/);
+  assert.match(source, /title=\{rowTitle\}/);
+});
+
+test("project header keeps its actions hover-only with a chevron on the right", async () => {
+  const css = await readFile(new URL("../app/native-theme.css", import.meta.url), "utf8");
+  assert.match(source, /className="sidebar-project-tree-chevron-button"/);
+  assert.match(css, /\.sidebar-project-tree-row-actions \{[^}]*opacity: 0;[^}]*pointer-events: none;/);
+  assert.match(css, /\.sidebar-project-tree-row\.is-menu-open \.sidebar-project-tree-row-actions/);
+  assert.match(css, /@media \(hover: none\) \{\s*\.sidebar-project-tree-row-actions \{\s*opacity: 1;/);
+});
+
+test("folded projects persist across reloads", () => {
+  assert.match(source, /getPrefJson<unknown>\(APP_PREF_KEYS\.collapsedProjects\)/);
+  assert.match(source, /setPrefJson\(APP_PREF_KEYS\.collapsedProjects, \[\.\.\.collapsedProjects\]\)/);
+  // "Collapse all" must look at the visible projects, not the stored set's size.
+  assert.match(source, /allProjects\.some\(\(g\) => !collapsedProjects\.has\(g\.projectRoot\)\)/);
+});
+
+test("the row menu shows the compaction count only when the session was compacted", () => {
+  assert.match(
+    sessionItemSource,
+    /\{\(session\.compactionCount \?\? 0\) > 0 && \(\s*<div>\{t\("sidebar\.compactionCount", \{ count: session\.compactionCount \?\? 0 \}\)\}<\/div>/,
+  );
 });

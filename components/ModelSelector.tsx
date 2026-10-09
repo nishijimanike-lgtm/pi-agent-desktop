@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { isImeComposing } from "@/lib/ime";
+import { SelectorRow } from "./SelectorRow";
 
 export interface ModelSelectorOption {
   provider: string;
@@ -23,6 +25,10 @@ interface ModelSelectorProps {
   ariaLabel?: string;
   variant?: "toolbar" | "field";
   placement?: "up" | "auto";
+  /** The model new sessions start with; its row gets a filled star. */
+  defaultValue?: { provider: string; modelId: string } | null;
+  /** Shows a star on every row that saves it as the default. */
+  onSetDefault?: (provider: string, modelId: string) => void;
 }
 
 const MODEL_FILTER_THRESHOLD = 8;
@@ -58,6 +64,8 @@ export function ModelSelector({
   ariaLabel,
   variant = "toolbar",
   placement = "up",
+  defaultValue,
+  onSetDefault,
 }: ModelSelectorProps) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
@@ -81,6 +89,7 @@ export function ModelSelector({
   const currentName = selectedLabel ?? (value
     ? sortedOptions.find((option) => option.modelId === value.modelId && option.provider === value.provider)?.name ?? value.modelId
     : emptyLabel ?? (sortedOptions.length > 0 ? "Select model" : "No models"));
+  const buttonTitle = busy ? "Switching model" : locked ? currentName : sortedOptions.length > 0 || onClear ? "Change model" : "No available models";
 
   useEffect(() => {
     const handleOutsideClick = (event: MouseEvent) => {
@@ -147,13 +156,19 @@ export function ModelSelector({
     if (!active || isAutoSelection) onChange(option.provider, option.modelId);
   };
 
+  const saveDefault = (option: ModelSelectorOption) => {
+    setOpen(false);
+    setFilter("");
+    onSetDefault?.(option.provider, option.modelId);
+  };
+
   return (
     <div
       ref={rootRef}
       className={`model-selector is-${variant}${locked ? " is-disabled" : ""}`}
       style={{ position: "relative", width: variant === "field" || isMobile ? "100%" : undefined, minWidth: 0, flex: variant === "toolbar" && isMobile ? "1 1 auto" : undefined }}
       onKeyDown={(event) => {
-        if (event.key !== "Escape" || !open) return;
+        if (event.key !== "Escape" || !open || isImeComposing(event)) return;
         event.preventDefault();
         event.stopPropagation();
         setFilter("");
@@ -162,12 +177,12 @@ export function ModelSelector({
     >
       <button
         type="button"
-        aria-label={ariaLabel}
+        aria-label={ariaLabel ?? buttonTitle}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-busy={busy || undefined}
         disabled={locked}
-        title={busy ? "Switching model" : locked ? currentName : sortedOptions.length > 0 || onClear ? "Change model" : "No available models"}
+        title={buttonTitle}
         style={buttonStyle}
         onClick={(event) => {
           const rect = event.currentTarget.getBoundingClientRect();
@@ -255,7 +270,10 @@ export function ModelSelector({
                   onChange={(event) => setFilter(event.target.value)}
                   placeholder={t("chat.filterModels")}
                   aria-label={t("chat.filterModels")}
-                  autoFocus
+                  // On phones, focusing the filter opens the on-screen keyboard,
+                  // which shrinks the viewport and pushes the list off-screen
+                  // before the user has decided to filter. Tap to filter instead.
+                  autoFocus={!isMobile}
                   autoComplete="off"
                   spellCheck={false}
                   style={{
@@ -276,11 +294,13 @@ export function ModelSelector({
             )}
             <div style={{ minHeight: 0, overflowY: "auto" }}>
               {onClear && !filter.trim() && (
-                <ModelOptionButton active={!value} label={emptyLabel ?? "Default"} onClick={() => {
+                <SelectorRow active={!value} gutter={Boolean(onSetDefault)} onSelect={() => {
                   setOpen(false);
                   setFilter("");
                   onClear();
-                }} />
+                }}>
+                  <OptionLabel label={emptyLabel ?? "Default"} />
+                </SelectorRow>
               )}
               {modelsByProvider.length === 0 ? (
                 <div style={{ padding: "8px 12px", color: "var(--text-dim)", fontSize: 12, whiteSpace: "nowrap" }}>
@@ -293,14 +313,23 @@ export function ModelSelector({
                       {group.provider}
                     </div>
                   )}
-                  {group.options.map((option) => (
-                    <ModelOptionButton
-                      key={`${option.provider}:${option.modelId}`}
-                      active={option.modelId === value?.modelId && option.provider === value?.provider}
-                      label={option.name}
-                      onClick={() => choose(option)}
-                    />
-                  ))}
+                  {group.options.map((option) => {
+                    return (
+                      <SelectorRow
+                        key={`${option.provider}:${option.modelId}`}
+                        active={option.modelId === value?.modelId && option.provider === value?.provider}
+                        onSelect={() => choose(option)}
+                        star={onSetDefault ? {
+                          isDefault: option.modelId === defaultValue?.modelId && option.provider === defaultValue?.provider,
+                          saveLabel: t("chat.saveDefaultModel"),
+                          defaultLabel: t("chat.defaultModel"),
+                          onSave: () => saveDefault(option),
+                        } : undefined}
+                      >
+                        <OptionLabel label={option.name} />
+                      </SelectorRow>
+                    );
+                  })}
                 </div>
               ))}
             </div>
@@ -311,21 +340,6 @@ export function ModelSelector({
   );
 }
 
-function ModelOptionButton({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      role="option"
-      aria-selected={active}
-      onClick={onClick}
-      style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "7px 12px", border: "none", background: active ? "var(--bg-selected)" : "none", color: active ? "var(--text)" : "var(--text-muted)", cursor: "pointer", fontSize: 12, fontWeight: active ? 600 : 400, textAlign: "left", whiteSpace: "nowrap" }}
-      onMouseEnter={(event) => { if (!active) event.currentTarget.style.background = "var(--bg-hover)"; }}
-      onMouseLeave={(event) => { if (!active) event.currentTarget.style.background = "none"; }}
-    >
-      {active
-        ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
-        : <span style={{ width: 10, flexShrink: 0 }} />}
-      <span title={label} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
-    </button>
-  );
+function OptionLabel({ label }: { label: string }) {
+  return <span title={label} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>;
 }

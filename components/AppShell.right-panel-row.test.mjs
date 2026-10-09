@@ -5,8 +5,9 @@ import test from "node:test";
 const source = readFileSync(new URL("./AppShell.tsx", import.meta.url), "utf8");
 
 /**
- * Merge sentinel (upstream segment D regression, 0e36743): the restructure
- * introduced two breaks the fork's layout depends on never having —
+ * Layout sentinels.
+ *
+ * The first two guard upstream segment D regressions (0e36743):
  *
  * 1. The "Center: chat" column closed right after the topbar, turning the
  *    chat wrapper into a second flex:1 ROW child: the viewport split 50/50
@@ -15,7 +16,10 @@ const source = readFileSync(new URL("./AppShell.tsx", import.meta.url), "utf8");
  *    close, i.e. as flex-COLUMN children of .app-shell: the closed panel's
  *    content height still stole vertical space from the chat row.
  *
- * Both are pinned here so the next merge cannot silently re-introduce them.
+ * The third pins the 2026-09 full-height sidebar restructure: the sidebar is
+ * a direct child of the outer row and the topbar moved into the main column
+ * that follows it, so the topbar starts at the center column and the sidebar
+ * runs the full window height (no blank strip above the sidebar).
  */
 test("chat wrapper stays inside the center column (no 50/50 topbar split)", () => {
   // The column must NOT close between the topbar and the chat content block:
@@ -33,9 +37,18 @@ test("right panel block is a row child (row closes after the panel, not before)"
   assert.ok(rowOpen !== -1, "row container not found");
   const panelIdx = source.indexOf("right-panel-container");
   assert.ok(panelIdx > rowOpen, "right panel JSX must come after the row opens");
+});
 
-  // The tail must close panel → row → shell in direct succession.
+test("topbar sits in the main column after the sidebar (sidebar runs full height)", () => {
+  const sidebarHandle = source.indexOf('data-resize-handle="sidebar"');
+  assert.ok(sidebarHandle !== -1, "sidebar resize handle not found");
+  const topbar = source.indexOf("Top bar with sidebar toggle");
+  assert.ok(topbar > sidebarHandle, "topbar must render after the sidebar, inside the main column");
+
+  // The tail must close panel → inner row → main column → outer row → shell
+  // in direct succession; fewer closes means a wrapper was dropped.
+  const panelIdx = source.indexOf("right-panel-container");
   const tail = source.slice(panelIdx);
-  const nesting = tail.indexOf("      </div>\n      </div>\n    </div>\n    {settingsSection");
-  assert.ok(nesting !== -1, "panel close must be followed by row close, then shell close");
+  const nesting = tail.indexOf("      </div>\n        </div>\n      </div>\n      </div>\n    </div>\n    {settingsSection");
+  assert.ok(nesting !== -1, "panel close must be followed by inner row, main column, outer row, then shell close");
 });

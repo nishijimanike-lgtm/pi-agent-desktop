@@ -69,17 +69,6 @@ const DISPLAY_MODE_LABELS: Record<DisplayMode, string> = {
   diff: "Diff",
 };
 
-function getDefaultDisplayMode(filePath: string, initialDisplayMode?: DisplayMode): DisplayMode {
-  if (initialDisplayMode === "diff") return "diff";
-
-  const extension = getFileExt(filePath);
-  if (extension === "md" || extension === "mdx" || extension === "html" || extension === "htm") {
-    return "preview";
-  }
-
-  return initialDisplayMode ?? "source";
-}
-
 const FILE_CODE_STYLE: CSSProperties = {
   fontFamily: "var(--font-mono)",
   fontSize: 13,
@@ -420,23 +409,6 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function formatLanguage(language: string): string {
-  const labels: Record<string, string> = {
-    css: "CSS",
-    html: "HTML",
-    javascript: "JavaScript",
-    jsx: "JavaScript React",
-    json: "JSON",
-    markdown: "Markdown",
-    plaintext: "Plain text",
-    text: "Plain text",
-    tsx: "TypeScript React",
-    typescript: "TypeScript",
-    yaml: "YAML",
-  };
-  return labels[language] ?? `${language.charAt(0).toUpperCase()}${language.slice(1)}`;
-}
-
 function diffLines(patch: string): DiffLine[] {
   const files = parseUnifiedPatch(patch);
   if (!files) return [];
@@ -609,7 +581,6 @@ function DiffView({ patch }: { patch: string }) {
 }
 
 function ImageViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Props) {
-  const { t } = useI18n();
   const [watching, setWatching] = useState(false);
   const [bust, setBust] = useState(0);
   const [size, setSize] = useState<number | null>(null);
@@ -1345,7 +1316,7 @@ export function FileViewer({
   if (isDocumentPreviewPath(filePath)) {
     return <DocumentViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} initialPage={initialPage} watchEnabled={watchEnabled} />;
   }
-  return <TextFileViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} onOpenFile={onOpenFile} onMentionLines={onMentionLines} gitRefreshKey={gitRefreshKey} initialDisplayMode={initialDisplayMode} initialState={initialState} onStateChange={onStateChange} watchEnabled={watchEnabled} />;
+  return <TextFileViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} onOpenFile={onOpenFile} onMentionLines={onMentionLines} onAtMention={onAtMention} gitRefreshKey={gitRefreshKey} initialDisplayMode={initialDisplayMode} initialState={initialState} onStateChange={onStateChange} watchEnabled={watchEnabled} />;
 }
 
 function TextFileViewer({
@@ -1370,21 +1341,27 @@ function TextFileViewer({
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const requestedInitialDisplayMode = resolveInitialFileDisplayMode(initialState, initialDisplayMode);
+  // The path default is resolved here, before the first fetch, so a markdown or
+  // HTML file renders its preview as the first thing painted. Deciding it after
+  // the contents load painted the source view for a frame first.
+  const requestedInitialDisplayMode = resolveInitialFileDisplayMode(initialState, initialDisplayMode, filePath);
   const initialWrapLines = initialState?.wrapLines ?? false;
   const initialScrollTop = initialState?.scrollTop ?? 0;
   const initialScrollLeft = initialState?.scrollLeft ?? 0;
   const [displayMode, setDisplayMode] = useState<DisplayMode>(requestedInitialDisplayMode);
   const [wrapLines, setWrapLines] = useState(initialWrapLines);
   const [watching, setWatching] = useState(false);
+  // HTML preview: the file is served from the app origin so its relative CSS,
+  // images and fonts load, which is only safe with scripts off (sandbox without
+  // allow-scripts, plus the route's CSP). Pages that need JS can opt into an
+  // isolated srcDoc sandbox instead, where scripts run but local files don't load.
+  const [htmlScriptsEnabled, setHtmlScriptsEnabled] = useState(false);
+  const [htmlPreviewRevision, setHtmlPreviewRevision] = useState(0);
   const esRef = useRef<EventSource | null>(null);
   const contentRequestRef = useRef(0);
   const gitDiffRequestRef = useRef(0);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const autoDiffAppliedRef = useRef(false);
-  const defaultPreviewEligibleRef = useRef(
-    initialState === undefined && initialDisplayMode === undefined,
-  );
   const scrollRestorePendingRef = useRef(true);
   const viewerStateRef = useRef<FileViewerState>({
     displayMode: requestedInitialDisplayMode,
@@ -1530,7 +1507,12 @@ function TextFileViewer({
       synchronize();
     });
 
-    es.addEventListener("change", synchronize);
+    es.addEventListener("change", () => {
+      synchronize();
+      // The served preview reads from disk itself; reload it on real changes
+      // only (not on "connected", which would wipe what the user typed into it).
+      setHtmlPreviewRevision((revision) => revision + 1);
+    });
 
     const markDisconnected = () => {
       setWatching(false);
@@ -1547,21 +1529,6 @@ function TextFileViewer({
   useEffect(() => {
     void fetchGitDiff(filePath);
   }, [fetchGitDiff, filePath, gitRefreshKey]);
-
-  useEffect(() => {
-    // HTML gets the same rendered-first treatment as markdown: a generated page
-    // is usually more useful viewed than read as source. Both have a preview
-    // mode already; the source tab stays one click away. A restored choice or
-    // explicit mode hint always wins over this default.
-    if (
-      defaultPreviewEligibleRef.current
-      && !data?.truncated
-      && (data?.language === "markdown" || data?.language === "html")
-    ) {
-      defaultPreviewEligibleRef.current = false;
-      updateDisplayMode("preview");
-    }
-  }, [data?.language, data?.truncated, updateDisplayMode]);
 
   const hasGitDiff = gitDiff?.supported === true && typeof gitDiff.patch === "string";
   const isDeletedDiff = hasGitDiff && gitDiff.status === "deleted";
@@ -1594,8 +1561,18 @@ function TextFileViewer({
   const language = data?.language ?? "text";
   const isHtml = language === "html";
   const isMarkdown = language === "markdown";
+  const htmlHasScripts = isHtml && /<script\b/i.test(viewerContent);
+  const htmlPreviewUrl = getFileApiUrl(filePath, "serve", sourceSessionId, { v: htmlPreviewRevision });
   const hasPreview = !data?.truncated && (isHtml || isMarkdown);
-  const effectiveDisplayMode = isDeletedDiff ? "diff" : displayMode;
+  // Only the first chunk of a large file is loaded, so preview is unavailable
+  // until the rest arrives; a preview default falls back to source instead of
+  // rendering a partial document. The mode returns to preview once the whole
+  // file is loaded, and the switch keeps showing source as active meanwhile.
+  const effectiveDisplayMode = isDeletedDiff
+    ? "diff"
+    : displayMode === "preview" && !hasPreview
+      ? "source"
+      : displayMode;
   const useLightweightSource = sourceLines.length > SOURCE_HIGHLIGHT_MAX_LINES
     && !(effectiveDisplayMode === "diff" && hasGitDiff)
     && !(effectiveDisplayMode === "preview" && hasPreview);
@@ -1832,6 +1809,21 @@ function TextFileViewer({
           )}
 
           <div className="file-viewer-actions">
+            {isHtml && effectiveDisplayMode === "preview" && htmlHasScripts && (
+              <button
+                type="button"
+                onClick={() => setHtmlScriptsEnabled((enabled) => !enabled)}
+                title={t(htmlScriptsEnabled ? "files.htmlScriptsOnTitle" : "files.htmlScriptsOffTitle")}
+                aria-pressed={htmlScriptsEnabled}
+                className="file-viewer-mode-button"
+                style={{
+                  background: htmlScriptsEnabled ? "var(--bg-selected)" : "transparent",
+                  color: htmlScriptsEnabled ? "var(--text)" : "var(--text-muted)",
+                }}
+              >
+                {t("files.htmlRunScripts")}
+              </button>
+            )}
             {(onAtMention || onMentionLines) && (
               <button
                 type="button"
@@ -1930,12 +1922,23 @@ function TextFileViewer({
         {effectiveDisplayMode === "diff" && hasGitDiff ? (
           <DiffView patch={gitDiff.patch!} />
         ) : isHtml && effectiveDisplayMode === "preview" ? (
-          <iframe
-            srcDoc={content}
-            sandbox="allow-scripts"
-            style={{ width: "100%", height: "100%", border: "none", background: "var(--bg)" }}
-             title={t("i18n.htmlPreview")}
-          />
+          htmlScriptsEnabled && htmlHasScripts ? (
+            <iframe
+              key="html-preview-scripts"
+              srcDoc={content}
+              sandbox="allow-scripts"
+              style={{ width: "100%", height: "100%", border: "none", background: "var(--bg)" }}
+              title={t("i18n.htmlPreview")}
+            />
+          ) : (
+            <iframe
+              key={htmlPreviewUrl}
+              src={htmlPreviewUrl}
+              sandbox="allow-same-origin"
+              style={{ width: "100%", height: "100%", border: "none", background: "var(--bg)" }}
+              title={t("i18n.htmlPreview")}
+            />
+          )
         ) : isMarkdown && effectiveDisplayMode === "preview" ? (
           <div
             className="markdown-body markdown-file-preview"

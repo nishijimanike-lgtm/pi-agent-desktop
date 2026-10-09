@@ -5,9 +5,12 @@ import test from "node:test";
 const source = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
 
 test("first paint does not read tab sessionStorage", () => {
+  // The fork initializes navigation through its workspace-aware wrapper
+  // (desktop cold-start restore); it calls getInitialNavigation internally,
+  // so tab sessionStorage is still read only in the post-mount effect.
   assert.match(
     source,
-    /const \[initialNavigation, setInitialNavigation\] = useState\(\(\) => getInitialNavigation\(searchParams\)\);/,
+    /const \[initialNavigation, setInitialNavigation\] = useState\(\(\) => resolveInitialNavigation\(searchParams, persistedWorkspace\)\);/,
   );
   assert.doesNotMatch(
     source,

@@ -9,6 +9,7 @@ const eslintConfig = [
       ".next-desktop/**",
       "src-tauri/resources/server/**",
       "src-tauri/target/**",
+      // demo/ is a separate Next.js project with its own lint config.
       "demo/**",
     ],
   },
